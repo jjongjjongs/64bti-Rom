@@ -92,6 +92,12 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private volatile Process qemuProcess;
     private final Deque<String> qemuTail = new ArrayDeque<>();
     private volatile boolean qemuTerminatedByHost = false;
+    /**
+     * Lines the guest actually produced. Counted separately from qemuTail because the tail also
+     * carries our own "stream interrupted" marker — using the tail's emptiness to detect a silent
+     * boot meant that marker suppressed the very warning it should have triggered.
+     */
+    private volatile int qemuOutputLines = 0;
     private String runtimeLog = "";
     private boolean runtimeStarted = false;
     private boolean surfaceAttached = false;
@@ -600,6 +606,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                         this.qemuTail.removeFirst();
                     }
                 }
+                this.qemuOutputLines++;
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastFlush[0] >= QEMU_LOG_UI_FLUSH_MS) {
                     lastFlush[0] = now;
@@ -633,11 +640,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         if (this.qemuTerminatedByHost) {
             out.append("\n※ 앱이 종료를 요청했습니다 (액티비티 종료). 게스트가 스스로 끝난 게 아닙니다.\n");
         }
-        boolean silent;
-        synchronized (this.qemuTail) {
-            silent = this.qemuTail.isEmpty();
-        }
-        if (silent) {
+        if (this.qemuOutputLines == 0) {
             out.append("\n⚠ QEMU 시리얼 출력이 한 줄도 없습니다.\n")
                     .append("커널이 콘솔에 아무것도 쓰지 못했다는 뜻입니다. 흔한 원인:\n")
                     .append("- 커널에 CONFIG_SERIAL_AMBA_PL011 이 없음 (ranchu 커널은 goldfish_tty 를 씀)\n")
@@ -645,6 +648,8 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                     .append("cmdline 의 earlycon 으로도 안 나오면 커널을 바꿔야 합니다.\n")
                     .append("재정의 파일: Android/data/" + getPackageName() + "/files/import/"
                             + KERNEL_CMDLINE_FILE + "\n");
+        } else {
+            out.append("\n게스트 시리얼 출력 ").append(this.qemuOutputLines).append("줄 수신됨.\n");
         }
         if (ranForMs < QEMU_EARLY_EXIT_MS) {
             out.append("\n⚠ 게스트가 부팅하지 못하고 즉시 종료했습니다.\n")

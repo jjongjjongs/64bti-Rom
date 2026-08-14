@@ -479,16 +479,40 @@ public class MainActivity extends Activity {
                     .show();
             return;
         }
-        java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        // The QEMU serial log is the one worth sharing when a boot fails, but it is not the most
+        // recently written file, so sorting purely by mtime buried it under the screen transcript
+        // and led to the wrong file being reported. Rank it first and label what each one is.
+        java.util.Arrays.sort(files, (a, b) -> {
+            int byName = Integer.compare(logPriority(a.getName()), logPriority(b.getName()));
+            return byName != 0 ? byName : Long.compare(b.lastModified(), a.lastModified());
+        });
         String[] labels = new String[files.length];
         for (int i = 0; i < files.length; i++) {
-            labels[i] = files[i].getName() + "  (" + humanSize(files[i].length()) + ")";
+            labels[i] = files[i].getName() + "  (" + humanSize(files[i].length()) + ")"
+                    + describeLogFile(files[i].getName());
         }
         new AlertDialog.Builder(this)
-                .setTitle("로그 — 최근 수정 순")
+                .setTitle("로그")
                 .setItems(labels, (dialog, which) -> showLogFile(files[which]))
                 .setNegativeButton("닫기", null)
                 .show();
+    }
+
+    private static int logPriority(String name) {
+        if ("qemu-modern.log".equals(name)) {
+            return 0;
+        }
+        return "last_run.txt".equals(name) ? 1 : 2;
+    }
+
+    private static String describeLogFile(String name) {
+        if ("qemu-modern.log".equals(name)) {
+            return "\n★ 게스트 커널/시리얼 출력 — 부팅 실패는 이걸 보세요";
+        }
+        if ("last_run.txt".equals(name)) {
+            return "\n화면에 표시된 실행 기록";
+        }
+        return "";
     }
 
     private void showLogFile(final File file) {
