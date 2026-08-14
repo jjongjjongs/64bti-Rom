@@ -129,6 +129,52 @@ goldfish/ranchu 계열 ARM 커널은 보통 **virtio-mmio 전용**으로 빌드�
 여전히 **부팅 후 `/dev/vport0p0` 존재 여부가 최대 관문**입니다(7절 4번). 다만 이제
 원인이 PCI 부재가 아니라 `CONFIG_VIRTIO_CONSOLE` 누락 쪽입니다.
 
+### 3.2b ⚠ 콘솔이 조용한 문제 (실측)
+
+첫 실기 실행에서 **QEMU가 11초 동안 시리얼 출력을 한 줄도 내지 않고 종료 코드 0으로
+끝났습니다.** 커널 패닉이면 뭐라도 찍혔을 텐데 완전 무음이었습니다.
+
+원인으로 가장 유력한 것은 **콘솔 불일치**입니다. ranchu 보드는 콘솔이
+`goldfish_tty`(`ttyGF0`)인데 우리는 `-machine virt`의 PL011(`ttyAMA0`)을 씁니다.
+SDK의 `kernel-ranchu`에 `CONFIG_SERIAL_AMBA_PL011`이 없으면 커널은 잘 돌면서도
+**출력할 곳이 없어 무음으로 부팅**합니다.
+
+그래서 기본 cmdline에 **earlycon**을 넣었습니다:
+
+```
+console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel ...
+```
+
+`earlycon`은 드라이버 probe 전에 virt 머신의 UART(`0x09000000`)에 직접 씁니다.
+`keep_bootcon`은 나중에 콘솔이 넘어가면서 조용해지는 걸 막습니다.
+
+**이걸로도 무음이면 커널이 아예 시작하지 못한 것**이고, 커널을 교체해야 합니다.
+
+### 3.2c cmdline 재정의 파일 — 앱 재빌드 없이 바꾸기
+
+cmdline을 한 글자 바꿀 때마다 CI 재빌드 → 다운로드 → 재설치는 너무 느립니다.
+그래서 앱이 이 파일을 읽습니다:
+
+```
+Android/data/com.example.singlevm/files/import/kernel_cmdline.txt
+```
+
+파일 관리자로 접근되는 위치입니다. 내용이 있으면 **그 한 줄이 `-append` 전체를
+대체**합니다(줄바꿈은 공백으로 치환하니 편집기가 줄을 접어도 됩니다). 실행 로그에
+어떤 cmdline을 썼는지 찍히고, 파일이 없으면 기본값을 씁니다.
+
+시도해볼 만한 변형들:
+
+```
+console=ttyGF0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw
+```
+```
+console=ttyAMA0 earlycon keep_bootcon ignore_loglevel androidboot.hardware=ranchu androidboot.selinux=permissive rdinit=/init root=/dev/ram0 rw
+```
+
+두 번째는 `/init.wrapper`를 건너뛰고 원래 `/init`으로 바로 가는 것으로, **래퍼가
+문제인지 커널이 문제인지 가르는** 데 씁니다.
+
 ### 3.3 커널 소스
 
 cmdline의 `kernel-android54`와 `binder.devices=`를 보면 **android-5.4 커널**을

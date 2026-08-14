@@ -59,6 +59,20 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      */
     private static final int TRANSPORT_PIPE_COUNT = 8;
     private static final long GUEST_DIAGNOSTICS_DELAY_MS = 60_000L;
+    /** Drop a one-line kernel cmdline here to override the default without rebuilding the app. */
+    private static final String KERNEL_CMDLINE_FILE = "kernel_cmdline.txt";
+    /**
+     * earlycon is what makes a silent boot diagnosable. console=ttyAMA0 only produces output once
+     * the PL011 driver is up, and a ranchu kernel consoles on goldfish_tty instead — so a kernel
+     * missing CONFIG_SERIAL_AMBA_PL011 boots and dies without printing a single character.
+     * earlycon writes straight to the virt machine's UART at 0x09000000 from very early on,
+     * before driver probing, and keep_bootcon stops it being handed off and silenced.
+     */
+    private static final String DEFAULT_KERNEL_CMDLINE =
+            "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel"
+                    + " androidboot.hardware=ranchu androidboot.selinux=permissive"
+                    + " binder.devices=binder,hwbinder,vndbinder"
+                    + " rdinit=/init.wrapper root=/dev/ram0 rw";
     /** How many trailing QEMU output lines are kept on screen. */
     private static final int QEMU_LOG_TAIL_LINES = 120;
     /** Minimum gap between on-screen refreshes while QEMU output is streaming in. */
@@ -75,6 +89,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private TextView logView;
     private volatile Process qemuProcess;
     private final Deque<String> qemuTail = new ArrayDeque<>();
+    private volatile boolean qemuTerminatedByHost = false;
     private String runtimeLog = "";
     private boolean runtimeStarted = false;
     private boolean surfaceAttached = false;
@@ -444,8 +459,55 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         command.add("-device");
         command.add("virtio-blk-device,drive=system");
         command.add("-append");
-        command.add("console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw");
+        command.add(resolveKernelCmdline());
         return command;
+    }
+
+    /**
+     * The kernel command line, overridable at runtime from a plain text file in external storage.
+     *
+     * <p>Each change here otherwise costs a CI rebuild, a download and a reinstall, which is a
+     * brutal loop for tuning boot arguments. The override file sits somewhere a file manager can
+     * reach, so a line can be edited and the guest relaunched in seconds.
+     */
+    private String resolveKernelCmdline() {
+        File override = kernelCmdlineOverrideFile();
+        if (override != null && override.isFile()) {
+            String text = readSmallFile(override);
+            if (text != null && !text.trim().isEmpty()) {
+                // Editors love to wrap; a kernel command line has to be one line.
+                String cmdline = text.replace('\n', ' ').replace('\r', ' ').trim();
+                appendRuntimeLog("\n\n커널 cmdline 재정의 사용: " + override.getAbsolutePath()
+                        + "\n" + cmdline);
+                return cmdline;
+            }
+        }
+        return DEFAULT_KERNEL_CMDLINE;
+    }
+
+    private File kernelCmdlineOverrideFile() {
+        File dir = getExternalFilesDir("import");
+        return dir == null ? null : new File(dir, KERNEL_CMDLINE_FILE);
+    }
+
+    private String readSmallFile(File file) {
+        if (file.length() > 8192) {
+            return null;
+        }
+        try (InputStream in = new FileInputStream(file)) {
+            byte[] buffer = new byte[(int) file.length()];
+            int read = 0;
+            while (read < buffer.length) {
+                int n = in.read(buffer, read, buffer.length - read);
+                if (n < 0) {
+                    break;
+                }
+                read += n;
+            }
+            return new String(buffer, 0, read, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     private String renderCommand(List<String> command) {
@@ -558,6 +620,22 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         StringBuilder out = new StringBuilder();
         out.append("QEMU_PROCESS_EXIT=").append(exitCode)
                 .append(" (").append(ranForMs).append("ms 실행)\n");
+        if (this.qemuTerminatedByHost) {
+            out.append("\n※ 앱이 종료를 요청했습니다 (액티비티 종료). 게스트가 스스로 끝난 게 아닙니다.\n");
+        }
+        boolean silent;
+        synchronized (this.qemuTail) {
+            silent = this.qemuTail.isEmpty();
+        }
+        if (silent) {
+            out.append("\n⚠ QEMU 시리얼 출력이 한 줄도 없습니다.\n")
+                    .append("커널이 콘솔에 아무것도 쓰지 못했다는 뜻입니다. 흔한 원인:\n")
+                    .append("- 커널에 CONFIG_SERIAL_AMBA_PL011 이 없음 (ranchu 커널은 goldfish_tty 를 씀)\n")
+                    .append("- 커널이 이 머신/CPU 조합에서 아예 시작하지 못함\n")
+                    .append("cmdline 의 earlycon 으로도 안 나오면 커널을 바꿔야 합니다.\n")
+                    .append("재정의 파일: Android/data/" + getPackageName() + "/files/import/"
+                            + KERNEL_CMDLINE_FILE + "\n");
+        }
         if (ranForMs < QEMU_EARLY_EXIT_MS) {
             out.append("\n⚠ 게스트가 부팅하지 못하고 즉시 종료했습니다.\n")
                     .append("커널/램디스크/시스템 이미지가 이 QEMU 구성(-machine virt)과 맞는지,\n")
@@ -628,6 +706,10 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     protected void onDestroy() {
         Process process = this.qemuProcess;
         if (!isChangingConfigurations() && process != null && process.isAlive()) {
+            // QEMU handles SIGTERM by shutting the VM down cleanly and exiting 0, which is
+            // indistinguishable in the log from the guest having powered itself off. Record that
+            // we asked for it so the exit report can say which happened.
+            this.qemuTerminatedByHost = true;
             process.destroy();
             if (activeQemuProcess == process) {
                 activeQemuProcess = null;
