@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -21,11 +22,20 @@ import com.example.singlevm.engine.Android7GuestEngineAdapter;
 import com.example.singlevm.engine.EngineAdapter;
 import com.example.singlevm.engine.EngineReadiness;
 import com.example.singlevm.engine.EngineRegistry;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 /* JADX INFO: loaded from: classes2.dex */
@@ -49,6 +59,12 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      */
     private static final int TRANSPORT_PIPE_COUNT = 8;
     private static final long GUEST_DIAGNOSTICS_DELAY_MS = 60_000L;
+    /** How many trailing QEMU output lines are kept on screen. */
+    private static final int QEMU_LOG_TAIL_LINES = 120;
+    /** Minimum gap between on-screen refreshes while QEMU output is streaming in. */
+    private static final long QEMU_LOG_UI_FLUSH_MS = 400L;
+    /** A guest that dies faster than this never really booted; say so loudly. */
+    private static final long QEMU_EARLY_EXIT_MS = 5_000L;
     private static final String GUEST_DIAGNOSTICS_COMMAND =
             "echo VM_DIAG_FILE_BEGIN\rcat /data/local/tmp/bootdiag.log 2>&1\recho VM_DIAG_FILE_END\r";
     private static final boolean NATIVE_RUNTIME_LOADED;
@@ -58,6 +74,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private String engineId;
     private TextView logView;
     private volatile Process qemuProcess;
+    private final Deque<String> qemuTail = new ArrayDeque<>();
     private String runtimeLog = "";
     private boolean runtimeStarted = false;
     private boolean surfaceAttached = false;
@@ -450,7 +467,11 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                 builder.environment().put("LD_LIBRARY_PATH",
                         getApplicationInfo().nativeLibraryDir + ":" + getFilesDir().getAbsolutePath());
                 builder.redirectErrorStream(true);
-                builder.redirectOutput(outputLog);
+                // Deliberately NOT redirectOutput(outputLog): that buries the kernel's own panic
+                // message in an app-private file the user cannot open without adb or root, and
+                // leaves the screen blank between launch and exit. Stream it instead, so a guest
+                // that dies during boot says why on screen.
+                long startedAt = SystemClock.elapsedRealtime();
                 this.qemuProcess = builder.start();
                 activeQemuProcess = this.qemuProcess;
                 if (EMUGL_PROBE_LOADED) {
@@ -468,11 +489,13 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                     runOnUiThread(() -> appendRuntimeLog("\n" + bridgeResult));
                 }
                 scheduleGuestDiagnostics(this.qemuProcess);
+                streamQemuOutput(this.qemuProcess, outputLog);
                 int exitCode = this.qemuProcess.waitFor();
+                long ranForMs = SystemClock.elapsedRealtime() - startedAt;
                 if (activeQemuProcess == this.qemuProcess) {
                     activeQemuProcess = null;
                 }
-                result = "QEMU_PROCESS_EXIT=" + exitCode + "\n로그: " + outputLog.getAbsolutePath();
+                result = describeGuestExit(exitCode, ranForMs, outputLog);
             } catch (IOException | InterruptedException | RuntimeException e) {
                 Thread.currentThread().interrupt();
                 result = "QEMU_SESSION_FAILED: " + e.getMessage();
@@ -480,6 +503,100 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
             final String output = result;
             runOnUiThread(() -> appendRuntimeLog("\n\n" + output));
         }, "single-vm-qemu").start();
+    }
+
+    /**
+     * Pumps QEMU's combined stdout/stderr to {@code outputLog} while mirroring a bounded tail to
+     * the screen. Returns when the guest closes the stream, i.e. when the process is on its way
+     * out. The stream must be drained regardless: if nobody reads it, QEMU blocks once the pipe
+     * buffer fills and the guest wedges partway through boot.
+     */
+    private void streamQemuOutput(Process process, File outputLog) {
+        long[] lastFlush = {0L};
+        try (BufferedReader reader =
+                     new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+             Writer logWriter =
+                     new OutputStreamWriter(new FileOutputStream(outputLog, false), StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                logWriter.write(line);
+                logWriter.write('\n');
+                logWriter.flush();
+                synchronized (this.qemuTail) {
+                    this.qemuTail.addLast(line);
+                    while (this.qemuTail.size() > QEMU_LOG_TAIL_LINES) {
+                        this.qemuTail.removeFirst();
+                    }
+                }
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastFlush[0] >= QEMU_LOG_UI_FLUSH_MS) {
+                    lastFlush[0] = now;
+                    runOnUiThread(this::renderLog);
+                }
+            }
+        } catch (IOException e) {
+            synchronized (this.qemuTail) {
+                this.qemuTail.addLast("[로그 스트림 중단: " + e.getMessage() + "]");
+            }
+        }
+        runOnUiThread(this::renderLog);
+    }
+
+    /**
+     * Turns the raw exit code into something the user can act on. An immediate exit means the
+     * command line or the images are wrong rather than the guest having shut down, so the tail of
+     * QEMU's own output is the useful part and gets pulled to the front.
+     */
+    private String describeGuestExit(int exitCode, long ranForMs, File outputLog) {
+        StringBuilder out = new StringBuilder();
+        out.append("QEMU_PROCESS_EXIT=").append(exitCode)
+                .append(" (").append(ranForMs).append("ms 실행)\n");
+        if (ranForMs < QEMU_EARLY_EXIT_MS) {
+            out.append("\n⚠ 게스트가 부팅하지 못하고 즉시 종료했습니다.\n")
+                    .append("커널/램디스크/시스템 이미지가 이 QEMU 구성(-machine virt)과 맞는지,\n")
+                    .append("램디스크에 커널 cmdline이 요구하는 /init.wrapper 가 있는지 확인하세요.\n");
+            String tail;
+            synchronized (this.qemuTail) {
+                tail = String.join("\n", this.qemuTail);
+            }
+            if (!tail.isEmpty()) {
+                out.append("\n--- QEMU 마지막 출력 ---\n").append(tail).append('\n');
+            } else {
+                out.append("\nQEMU가 아무 출력도 남기지 않았습니다 (실행 파일 자체가 기동 실패했을 가능성).\n");
+            }
+        }
+        out.append("\n로그: ").append(outputLog.getAbsolutePath());
+        File shared = copyLogToSharedDir(outputLog);
+        if (shared != null) {
+            out.append("\n복사본(파일 관리자로 접근 가능): ").append(shared.getAbsolutePath());
+        }
+        return out.toString();
+    }
+
+    /**
+     * Mirrors the QEMU log into external app storage. getFilesDir() is unreadable without adb or
+     * root, which makes the single most useful diagnostic artifact effectively invisible.
+     */
+    private File copyLogToSharedDir(File outputLog) {
+        File sharedDir = getExternalFilesDir("logs");
+        if (sharedDir == null || !outputLog.isFile()) {
+            return null;
+        }
+        if (!sharedDir.exists() && !sharedDir.mkdirs()) {
+            return null;
+        }
+        File shared = new File(sharedDir, outputLog.getName());
+        try (InputStream in = new FileInputStream(outputLog);
+             OutputStream out = new FileOutputStream(shared, false)) {
+            byte[] buffer = new byte[65536];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return shared;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /**
@@ -545,10 +662,26 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
 
     private void setRuntimeLog(String value) {
         this.runtimeLog = value;
-        if (this.logView != null) {
-            this.logView.setText(this.runtimeLog);
-        }
+        renderLog();
         writeRuntimeLog(this.runtimeLog);
+    }
+
+    /**
+     * Repaints the log view from the setup transcript plus the streamed QEMU tail. Kept separate
+     * from {@link #setRuntimeLog} so streaming output can refresh the screen without rewriting
+     * last_run.txt on every line.
+     */
+    private void renderLog() {
+        if (this.logView == null) {
+            return;
+        }
+        String tail;
+        synchronized (this.qemuTail) {
+            tail = this.qemuTail.isEmpty() ? "" : String.join("\n", this.qemuTail);
+        }
+        this.logView.setText(tail.isEmpty()
+                ? this.runtimeLog
+                : this.runtimeLog + "\n\n--- QEMU ---\n" + tail);
     }
 
     /* JADX INFO: Access modifiers changed from: private */
