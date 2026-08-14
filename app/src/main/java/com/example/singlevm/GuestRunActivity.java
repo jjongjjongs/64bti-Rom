@@ -77,6 +77,8 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private static final int QEMU_LOG_TAIL_LINES = 120;
     /** Minimum gap between on-screen refreshes while QEMU output is streaming in. */
     private static final long QEMU_LOG_UI_FLUSH_MS = 400L;
+    /** How often the running log is mirrored somewhere a file manager can open. */
+    private static final long QEMU_LOG_MIRROR_MS = 3_000L;
     /** A guest that dies faster than this never really booted; say so loudly. */
     private static final long QEMU_EARLY_EXIT_MS = 5_000L;
     private static final String GUEST_DIAGNOSTICS_COMMAND =
@@ -582,6 +584,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      */
     private void streamQemuOutput(Process process, File outputLog) {
         long[] lastFlush = {0L};
+        long[] lastMirror = {0L};
         try (BufferedReader reader =
                      new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
              Writer logWriter =
@@ -601,6 +604,13 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                 if (now - lastFlush[0] >= QEMU_LOG_UI_FLUSH_MS) {
                     lastFlush[0] = now;
                     runOnUiThread(this::renderLog);
+                }
+                // Mirror to external storage while the guest is still running. Copying only at
+                // exit meant the boot log could not be read without killing the guest first, and
+                // leaving the activity to go read it is exactly what kills it.
+                if (now - lastMirror[0] >= QEMU_LOG_MIRROR_MS) {
+                    lastMirror[0] = now;
+                    copyLogToSharedDir(outputLog);
                 }
             }
         } catch (IOException e) {
@@ -752,7 +762,19 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private void setRuntimeLog(String value) {
         this.runtimeLog = value;
         renderLog();
-        writeRuntimeLog(this.runtimeLog);
+        // Persist exactly what the screen shows. Writing only runtimeLog left last_run.txt
+        // without any of the guest's serial output, so sharing that file looked like the guest
+        // had printed nothing at all when in fact it had.
+        writeRuntimeLog(composeLog());
+    }
+
+    /** The full transcript: setup messages plus whatever the guest has printed so far. */
+    private String composeLog() {
+        String tail;
+        synchronized (this.qemuTail) {
+            tail = this.qemuTail.isEmpty() ? "" : String.join("\n", this.qemuTail);
+        }
+        return tail.isEmpty() ? this.runtimeLog : this.runtimeLog + "\n\n--- QEMU ---\n" + tail;
     }
 
     /**
@@ -761,16 +783,9 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      * last_run.txt on every line.
      */
     private void renderLog() {
-        if (this.logView == null) {
-            return;
+        if (this.logView != null) {
+            this.logView.setText(composeLog());
         }
-        String tail;
-        synchronized (this.qemuTail) {
-            tail = this.qemuTail.isEmpty() ? "" : String.join("\n", this.qemuTail);
-        }
-        this.logView.setText(tail.isEmpty()
-                ? this.runtimeLog
-                : this.runtimeLog + "\n\n--- QEMU ---\n" + tail);
     }
 
     /* JADX INFO: Access modifiers changed from: private */
