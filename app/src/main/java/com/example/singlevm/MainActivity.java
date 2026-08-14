@@ -992,7 +992,56 @@ public class MainActivity extends Activity {
         String nativeReport = getNativeProbeReport(active);
         EngineAdapter primaryEngine = EngineRegistry.primary();
         EngineReadiness primaryState = primaryEngine.inspect(this, this.vmRoot);
-        new AlertDialog.Builder(this).setTitle("실행 전 APK 스캔").setMessage(message + "\n\n기본 실행 엔진\n" + primaryEngine.displayName() + "\n" + primaryState.summary + "\n" + primaryState.details + "\n\n기존 네이티브 진단 브릿지\n" + nativeReport).setPositiveButton("확인", (DialogInterface.OnClickListener) null).show();
+        new AlertDialog.Builder(this)
+                .setTitle("실행 전 APK 스캔")
+                .setMessage(describeDeviceAbis() + "\n\n" + message
+                        + "\n\n기본 실행 엔진\n" + primaryEngine.displayName() + "\n"
+                        + primaryState.summary + "\n" + primaryState.details
+                        + "\n\n기존 네이티브 진단 브릿지\n" + nativeReport)
+                .setPositiveButton("확인", null)
+                .show();
+    }
+
+    /**
+     * Reports whether this device can execute 32-bit ARM code at all.
+     *
+     * <p>This is the single most important fact for the app's goal. SoCs built only from
+     * AArch64-only cores (Cortex-X4 / A720 / A520 and later) cannot decode AArch32 instructions
+     * in userspace, so on those devices no amount of container work will run an armeabi-v7a
+     * library natively — translation or emulation is the only option. Where a 32-bit ABI is
+     * present, running the guest's libraries directly is both possible and far faster than
+     * emulating a whole guest OS.
+     */
+    private String describeDeviceAbis() {
+        String[] abis32 = Build.SUPPORTED_32_BIT_ABIS;
+        boolean has32 = abis32 != null && abis32.length > 0;
+        StringBuilder out = new StringBuilder();
+        out.append("기기 ABI 지원\n");
+        out.append("- 전체: ").append(joinArray(Build.SUPPORTED_ABIS)).append('\n');
+        out.append("- 32비트: ").append(joinArray(abis32)).append('\n');
+        out.append("- 64비트: ").append(joinArray(Build.SUPPORTED_64_BIT_ABIS)).append('\n');
+        if (has32) {
+            out.append("→ 이 기기는 32비트 프로세스를 만들 수 있습니다. ARM32 라이브러리를\n")
+                    .append("  네이티브 속도로 실행 가능하므로 전체 시스템 에뮬레이션이 필요하지 않습니다.");
+        } else {
+            out.append("→ 이 기기는 32비트 ARM을 아예 실행할 수 없습니다(64비트 전용 CPU).\n")
+                    .append("  ARM32 코드를 돌리려면 번역 계층이나 에뮬레이션이 반드시 필요합니다.");
+        }
+        return out.toString();
+    }
+
+    private String joinArray(String[] values) {
+        if (values == null || values.length == 0) {
+            return "없음";
+        }
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (out.length() > 0) {
+                out.append(", ");
+            }
+            out.append(value);
+        }
+        return out.toString();
     }
 
     private String getNativeProbeReport(String installId) {
