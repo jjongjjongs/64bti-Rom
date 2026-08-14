@@ -150,13 +150,11 @@ jobs:
       - name: Smoke boot the guest under QEMU
         continue-on-error: true
         env:
-          BOOT_SECONDS: "150"
+          BOOT_SECONDS: "120"
         run: |
           sudo apt-get install -y -qq qemu-system-arm
           WORK="$GITHUB_WORKSPACE/guest-out"
           BOOT=/tmp/boot && mkdir -p "$BOOT/transport"
-
-          echo "커널 파일 종류: $(file -b "$WORK/kernel")"
 
           ARGS=(-machine virt,gic-version=3 -cpu cortex-a15
                 -accel tcg,thread=multi,tb-size=256 -smp 2 -m 1024
@@ -168,35 +166,53 @@ jobs:
             ARGS+=(-device "virtserialport,chardev=singlevmpipe$i,name=org.singlevm.pipe.$i")
           done
           ARGS+=(-monitor none -nic none
-                 -serial "file:$BOOT/serial.log"
-                 -kernel "$WORK/kernel" -initrd "$WORK/ramdisk.img"
+                 -initrd "$WORK/ramdisk.img"
                  -drive "if=none,id=system,format=raw,readonly=on,file=$WORK/system.img"
                  -device virtio-blk-device,drive=system
                  -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
 
-          echo "==> ${BOOT_SECONDS}초 부팅 시도"
-          timeout "$BOOT_SECONDS" qemu-system-aarch64 "${ARGS[@]}" > /tmp/qemu-stdout.log 2>&1 || true
+          boot_with() {   # $1 = 라벨, $2 = 커널 경로
+            local label="$1" kern="$2"
+            local serial="$BOOT/serial-$label.log" stdout="$BOOT/qemu-$label.log"
+            rm -f "$serial" "$stdout"
+            echo "==> [$label] $(file -b "$kern")"
+            timeout "$BOOT_SECONDS" qemu-system-aarch64 "${ARGS[@]}" \
+              -serial "file:$serial" -kernel "$kern" > "$stdout" 2>&1 || true
+            local size
+            size=$(stat -c%s "$serial" 2>/dev/null || echo 0)
+            {
+              echo "## [$label] 시리얼 출력: ${size} bytes"
+              echo '```'
+              if [ "$size" -gt 0 ]; then head -c 16000 "$serial"; else echo "(무음)"; fi
+              echo '```'
+              echo "QEMU 자체 출력:"
+              echo '```'
+              head -c 2000 "$stdout" || true
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          }
 
-          SIZE=$(stat -c%s "$BOOT/serial.log" 2>/dev/null || echo 0)
-          {
-            echo "## 스모크 부팅 결과"
-            echo "시리얼 출력: ${SIZE} bytes"
-            echo '```'
-            if [ "$SIZE" -gt 0 ]; then head -c 20000 "$BOOT/serial.log"; else echo "(무음 — 커널이 아무것도 출력하지 않음)"; fi
-            echo '```'
-            echo "### QEMU 자체 출력"
-            echo '```'
-            head -c 4000 /tmp/qemu-stdout.log || true
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # 1) SDK 의 kernel-ranchu — goldfish 하드웨어용이라 virt 에서 뜨는지 확인
+          boot_with sdk-ranchu "$WORK/kernel"
+
+          # 2) 검증된 대조군: Debian armhf 넷부트 커널. multi_v7 기반이라 QEMU virt 를
+          #    지원하고 PL011 · virtio-mmio · virtio-console 이 들어 있다. 안드로이드는
+          #    binder 가 없어 못 뜨지만, /init.wrapper 가 vport 개수를 찍어주면
+          #    "가상 하드웨어 + 램디스크 + 래퍼" 배관이 멀쩡하다는 게 증명된다.
+          if curl -fsSL -o "$BOOT/vmlinuz-debian" \
+               https://deb.debian.org/debian/dists/stable/main/installer-armhf/current/images/netboot/vmlinuz; then
+            boot_with debian-armmp "$BOOT/vmlinuz-debian"
+          else
+            echo "Debian 대조군 커널을 받지 못했습니다" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: smoke-boot-logs
           path: |
-            /tmp/boot/serial.log
-            /tmp/qemu-stdout.log
+            /tmp/boot/serial-*.log
+            /tmp/boot/qemu-*.log
           if-no-files-found: warn
 
       - name: Show disk space after
