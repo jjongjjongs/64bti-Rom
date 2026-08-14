@@ -176,6 +176,7 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
   먼저 부팅시키는 방법(검증된 명령줄 포함)이 들어 있습니다.
 - [docs/ARCHITECTURE-NOTES.md](docs/ARCHITECTURE-NOTES.md) — 왜 아직 게임이 실행되지
   않는지, `.so` 실측 결과, 접근 방식 비교.
+- [guest/README.md](guest/README.md) — 게스트 안에서 도는 구성요소 (`init.wrapper`).
 
 ## TODO
 
@@ -184,7 +185,8 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
 - [x] 빌드 설정 AGP 8 호환화 + Gradle wrapper 추가
 - [x] 네이티브 라이브러리 진짜 버전 특정
 - [x] `./gradlew :app:assembleDebug` 실제 통과 확인 (CI, APK 아티팩트 생성)
-- [ ] **게스트 이미지 제작** (kernel + ramdisk/init.wrapper) — 최우선, docs/GUEST-IMAGE.md 참고
+- [x] `/init.wrapper` 1차 버전 (vport 확인 + /init 인계) — `guest/init_wrapper/`
+- [ ] **게스트 이미지 제작** (kernel + system.img + 램디스크 재패킹) — 최우선, docs/GUEST-IMAGE.md 참고
 - [ ] `/dev/qemu_pipe` → virtio-serial 다중화 방식 결정 (docs/GUEST-IMAGE.md 4.2)
 - [x] virtio 버스를 MMIO로 통일 (게스트 커널에 PCI 불필요)
 - [ ] 게스트 부팅 성공 후: APK를 게스트로 넘기는 통로 구현

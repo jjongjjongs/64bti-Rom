@@ -11,3 +11,6 @@ local.properties
 *.apk
 *.ap_
 *.dex
+
+# guest 빌드 산출물
+/guest/init_wrapper/init.wrapper

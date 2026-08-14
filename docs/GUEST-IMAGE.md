@@ -164,11 +164,15 @@ MMIO로 통일했으므로 PCI 문제는 사라졌고, 남은 관건은 `CONFIG_
 2. `/dev/qemu_pipe`(및 `/dev/goldfish_pipe`) 요청을 virtio-serial 포트로 연결
 3. 원래 `/init`을 `execv`로 넘김 (argv 보존)
 
+소스와 빌드 스크립트가 저장소에 있습니다:
+
 ```sh
-# NDK로 빌드
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang \
-    -static -O2 -o init.wrapper init_wrapper.c
+cd guest/init_wrapper
+ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.0.12077973 ./build.sh
 ```
+
+자세한 설명은 [../guest/README.md](../guest/README.md). 1차 버전은 vport 존재 확인과
+로그만 하고 `/init`으로 넘깁니다 — 아래 4.2의 다중화는 아직 하지 않습니다.
 
 ### 4.2 ⚠ 파이프 다중화 문제
 
