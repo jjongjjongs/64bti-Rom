@@ -1,0 +1,160 @@
+name: guest-image
+
+# 게스트 이미지(kernel + ramdisk + system.img)를 조립해서 아티팩트로 올린다.
+#
+# PC 없이 폰만으로 작업하는 경우를 위한 것이다. 러너에는 Android SDK, NDK, 네트워크,
+# 리눅스 도구가 모두 있으므로 docs/GUEST-IMAGE.md 의 PC 작업을 대신할 수 있다.
+# 완성된 android7-guest.zip 을 폰에서 내려받아 앱의 "Android 7 구성 가져오기"로
+# 임포트하면 된다.
+#
+# 무겁기 때문에 수동 실행(workflow_dispatch)만 한다.
+
+on:
+  # 기본 브랜치에 있어야 workflow_dispatch 가 노출되므로, 작업 브랜치에서도 돌 수 있게
+  # 게스트 관련 파일이 바뀔 때만 뜨는 push 트리거를 함께 둔다.
+  push:
+    paths:
+      - "guest/**"
+      - ".github/workflows/guest-image.yml"
+  workflow_dispatch:
+    inputs:
+      api_level:
+        description: "게스트 Android API 레벨 (24 = Android 7.0)"
+        default: "24"
+      userdata_size:
+        description: "userdata.img 크기"
+        default: "2G"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Show disk space before
+        run: df -h /
+
+      - name: Install guest system image
+        env:
+          API: ${{ inputs.api_level || '24' }}
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null
+          "$SDKM" "system-images;android-$API;default;armeabi-v7a"
+
+      # 첫 실행의 목적 절반은 "SDK 이미지가 실제로 어떤 파일을 주는가"를 확인하는 것이다.
+      # 여기 출력이 이후 단계의 근거가 된다.
+      - name: Inspect what the SDK actually shipped
+        id: inspect
+        env:
+          API: ${{ inputs.api_level || '24' }}
+        run: |
+          SYSIMG="$ANDROID_HOME/system-images/android-$API/default/armeabi-v7a"
+          echo "SYSIMG=$SYSIMG" >> "$GITHUB_ENV"
+          echo "## 시스템 이미지 디렉터리" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la "$SYSIMG" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "## 파일 종류" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for f in "$SYSIMG"/*; do
+            [ -f "$f" ] || continue
+            printf '%-24s %s\n' "$(basename "$f")" "$(file -b "$f")" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cpio zip android-sdk-libsparse-utils qemu-utils
+
+      - name: Build init.wrapper (static ARM32, NDK)
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          echo "NDK=$NDK"
+          ANDROID_NDK_HOME="$NDK" API_LEVEL=${{ inputs.api_level || '24' }} \
+            guest/init_wrapper/build.sh "$GITHUB_WORKSPACE/init.wrapper"
+          file "$GITHUB_WORKSPACE/init.wrapper"
+
+      - name: Assemble guest images
+        env:
+          USERDATA_SIZE: ${{ inputs.userdata_size || '2G' }}
+        run: |
+          set -euo pipefail
+          WORK="$GITHUB_WORKSPACE/guest-out"
+          mkdir -p "$WORK"
+
+          # --- kernel ---
+          KERNEL=""
+          for name in kernel-ranchu kernel-qemu kernel; do
+            if [ -f "$SYSIMG/$name" ]; then KERNEL="$SYSIMG/$name"; break; fi
+          done
+          if [ -z "$KERNEL" ]; then
+            echo "::error::시스템 이미지 패키지에 커널이 없습니다. 위 inspect 출력 확인 필요."
+            exit 1
+          fi
+          echo "커널: $KERNEL"
+          cp "$KERNEL" "$WORK/kernel"
+
+          # --- system.img (sparse / qcow2 면 raw 로 변환) ---
+          SYS="$SYSIMG/system.img"
+          [ -f "$SYS" ] || { echo "::error::system.img 없음"; exit 1; }
+          case "$(file -b "$SYS")" in
+            *"Android sparse image"*) echo "sparse -> raw"; simg2img "$SYS" "$WORK/system.img" ;;
+            *QCOW*)                   echo "qcow2 -> raw";  qemu-img convert -O raw "$SYS" "$WORK/system.img" ;;
+            *)                        cp "$SYS" "$WORK/system.img" ;;
+          esac
+
+          # --- ramdisk: init.wrapper 를 넣어 재패킹 ---
+          RD="$SYSIMG/ramdisk.img"
+          [ -f "$RD" ] || { echo "::error::ramdisk.img 없음"; exit 1; }
+          mkdir -p "$WORK/rd" && cd "$WORK/rd"
+          case "$(file -b "$RD")" in
+            *gzip*) zcat "$RD" | cpio -idm ;;
+            *LZ4*)  lz4 -dc "$RD" | cpio -idm ;;
+            *)      cpio -idm < "$RD" ;;
+          esac
+          cp "$GITHUB_WORKSPACE/init.wrapper" ./init.wrapper
+          chmod 750 ./init.wrapper
+          find . | cpio -o -H newc | gzip > "$WORK/ramdisk.img"
+          cd "$GITHUB_WORKSPACE"
+
+          # 재패킹 검증: 래퍼가 들어갔고 원래 init 이 남아 있어야 한다
+          zcat "$WORK/ramdisk.img" | cpio -t 2>/dev/null > /tmp/rd.list
+          grep -qx "init.wrapper" /tmp/rd.list || { echo "::error::init.wrapper 가 램디스크에 없음"; exit 1; }
+          grep -qx "init"         /tmp/rd.list || { echo "::error::원래 init 이 사라짐"; exit 1; }
+          echo "램디스크 재패킹 검증 통과"
+
+          # --- userdata ---
+          if [ -f "$SYSIMG/userdata.img" ]; then cp "$SYSIMG/userdata.img" "$WORK/userdata.img"; fi
+          truncate -s "$USERDATA_SIZE" "$WORK/userdata.img"
+
+          # --- 임포터 규격대로 패키징 (경로 없이 basename 만) ---
+          cd "$WORK"
+          rm -rf rd
+          zip -0 -j "$GITHUB_WORKSPACE/android7-guest.zip" kernel ramdisk.img system.img userdata.img
+          cd "$GITHUB_WORKSPACE"
+
+          {
+            echo "## 결과"
+            echo '```'
+            ls -la "$WORK"
+            echo
+            echo "패키지: $(du -h android7-guest.zip | cut -f1)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show disk space after
+        if: always()
+        run: df -h /
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android7-guest
+          path: android7-guest.zip
+          if-no-files-found: error
+          compression-level: 6
