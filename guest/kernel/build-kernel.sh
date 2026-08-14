@@ -23,6 +23,38 @@ git clone --depth 1 -b "$KERNEL_BRANCH" \
 cd "$SRC"
 
 export ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf-
+
+# --- 32비트 바인더 ABI 복원 ---
+#
+# API 24 armeabi-v7a 시스템 이미지의 유저스페이스는 옛 32비트 바인더 API(프로토콜 7,
+# 바인더 구조체 안의 포인터가 32비트)로 빌드돼 있다. 커널 쪽 BINDER_IPC_32BIT 는 이후
+# 삭제돼서 5.10 은 항상 프로토콜 8 과 64비트 포인터만 제공한다.
+#
+# 실측: /dev/binder 가 정상적으로 생기고 열리는데도
+#   "Binder driver protocol does not match user space protocol!"
+#   "Binder driver could not be opened. Terminating."
+# 로 servicemanager 가 exit 255 로 죽고, 4번 반복되자 init 이 recovery 로 리부트했다.
+#
+# uapi 헤더의 타입 정의와 버전만 되돌리면 드라이버 전체가 32비트 ABI 로 컴파일된다.
+# 헤더 모양이 달라져서 치환이 안 먹으면 조용히 잘못된 커널을 만들지 말고 여기서 멈춘다.
+BINDER_UAPI=include/uapi/linux/android/binder.h
+sed -i \
+  -e 's/^typedef __u64 binder_size_t;$/typedef __u32 binder_size_t;/' \
+  -e 's/^typedef __u64 binder_uintptr_t;$/typedef __u32 binder_uintptr_t;/' \
+  -e 's/^#define BINDER_CURRENT_PROTOCOL_VERSION 8$/#define BINDER_CURRENT_PROTOCOL_VERSION 7/' \
+  "$BINDER_UAPI"
+for expect in \
+  '^typedef __u32 binder_size_t;$' \
+  '^typedef __u32 binder_uintptr_t;$' \
+  '^#define BINDER_CURRENT_PROTOCOL_VERSION 7$'; do
+  grep -qE "$expect" "$BINDER_UAPI" || {
+    echo "::error::바인더 uapi 패치 실패 ($expect). 헤더 내용:"
+    grep -nE 'binder_size_t;|binder_uintptr_t;|BINDER_CURRENT_PROTOCOL_VERSION' "$BINDER_UAPI"
+    exit 1
+  }
+done
+echo "바인더 uapi 를 32비트 ABI(프로토콜 7)로 되돌렸다"
+
 make -s multi_v7_defconfig
 
 # 안드로이드가 요구하는 것 + 우리 가상 하드웨어. 실측에서 나온 목록 그대로.
@@ -72,6 +104,10 @@ for opt in CONFIG_VIRTIO_CONSOLE CONFIG_SECURITY_SELINUX CONFIG_ANDROID_BINDER_I
            CONFIG_ASHMEM CONFIG_LSM CONFIG_KALLSYMS; do
   printf '%-34s %s\n' "$opt" "$(grep -E "^$opt=" .config || echo '(설정 안 됨)')"
 done | tee "$(dirname "$OUT")/kernel-config.txt"
+
+# 바인더 ABI 는 .config 에 안 나오므로 헤더에서 직접 확인해 같이 남긴다.
+grep -E 'binder_size_t;|binder_uintptr_t;|BINDER_CURRENT_PROTOCOL_VERSION' "$BINDER_UAPI" \
+  | sed 's/^/binder uapi: /' | tee -a "$(dirname "$OUT")/kernel-config.txt"
 
 make -j"$(nproc)" zImage
 cp arch/arm/boot/zImage "$OUT"
