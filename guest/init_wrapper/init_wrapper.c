@@ -253,12 +253,19 @@ static void probe_data_mount(void) {
     // 커널이 이 장치를 쓰기 금지로 보고 있는가. mount(2) 의 EACCES 는 십중팔구 이것이고,
     // /sys/block/<dev>/ro 가 그 값을 그대로 보여준다. 세 장치를 나란히 찍어야
     // "vdc 만 그런가"가 판별된다.
-    const char *disks[] = {"vda", "vdb", "vdc"};
+    //
+    // size 도 같이 찍는다. 세 이미지의 크기가 서로 다르므로(system 1.75G, cache 256M,
+    // userdata 2G) 크기가 곧 신원이다. virtio-mmio 는 장치가 커맨드라인 순서대로
+    // vda/vdb/vdc 가 된다는 보장이 없어서, "vdc 가 정말 userdata 인가"부터 확인해야 한다.
+    // 단위는 512바이트 섹터: system=3670016, cache=524288, userdata=4194304.
+    const char *disks[] = {"vda", "vdb", "vdc", "vdd"};
     for (size_t i = 0; i < sizeof(disks) / sizeof(disks[0]); i++) {
-        char path[64], val[16] = "?";
+        char path[64], ro[16] = "?", size[32] = "?";
         snprintf(path, sizeof(path), "/sys/block/%s/ro", disks[i]);
-        if (read_small(path, val, sizeof(val)) > 0) chomp(val); else strcpy(val, "(unreadable)");
-        put_fmt("wd probe: /sys/block/%s/ro = %s", disks[i], val);
+        if (read_small(path, ro, sizeof(ro)) > 0) chomp(ro); else continue;
+        snprintf(path, sizeof(path), "/sys/block/%s/size", disks[i]);
+        if (read_small(path, size, sizeof(size)) > 0) chomp(size); else strcpy(size, "?");
+        put_fmt("wd probe: %s ro=%s sectors=%s", disks[i], ro, size);
     }
 
     const char *dev = "/dev/block/vdc";
@@ -275,8 +282,9 @@ static void probe_data_mount(void) {
     } else {
         put_fmt("wd probe: open(%s, O_RDWR) failed: %s (errno=%d)", dev, strerror(errno), errno);
     }
-    if (mkdir("/wd_probe", 0755) != 0 && errno != EEXIST) {
-        put_fmt("wd probe: mkdir failed: %s", strerror(errno));
+    const char *probe_dir = "/dev/wd_probe";  // rootfs 는 이 시점에 ro 로 리마운트돼 있다
+    if (mkdir(probe_dir, 0755) != 0 && errno != EEXIST) {
+        put_fmt("wd probe: mkdir %s failed: %s", probe_dir, strerror(errno));
         return;
     }
     // 쓰기 가능으로 한 번, 읽기 전용으로 한 번. rw 만 실패하면 장치가 쓰기 금지인 것이고,
@@ -285,15 +293,15 @@ static void probe_data_mount(void) {
         {0, "rw"}, {MS_RDONLY, "ro"},
     };
     for (size_t i = 0; i < sizeof(tries) / sizeof(tries[0]); i++) {
-        if (mount(dev, "/wd_probe", "ext4", tries[i].flags, NULL) == 0) {
+        if (mount(dev, probe_dir, "ext4", tries[i].flags, NULL) == 0) {
             put_fmt("wd probe: mount %s ext4 %s OK", dev, tries[i].what);
-            umount("/wd_probe");
+            umount(probe_dir);
         } else {
             put_fmt("wd probe: mount %s ext4 %s failed: %s (errno=%d)",
                     dev, tries[i].what, strerror(errno), errno);
         }
     }
-    rmdir("/wd_probe");
+    rmdir(probe_dir);
 }
 
 static void watchdog_main(void) {
