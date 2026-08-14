@@ -216,17 +216,29 @@ jobs:
 
           # --- userdata / cache ---
           # 순서가 곧 vda/vdb/vdc 이고, Android 7 fstab.ranchu 는
-          #   vda=/system, vdb=/cache, vdc=/data 를 기대한다(실측: 없으면 fs_mgr 이
-          #   "No such file or directory" 로 실패하고 healthd 가 죽으며 recovery 로 재부팅).
-          # 그래서 cache.img 를 반드시 만들어 넣는다.
-          mkfs.ext4 -q -F -L cache -b 4096 "$WORK/cache.img" 256M
+          #   vda=/system, vdb=/cache, vdc=/data 를 기대한다(실측).
+          #
+          # SDK 의 userdata.img 를 복사해서 truncate + resize2fs 하는 방식은 원본 크기와
+          # 기능 플래그에 의존해 깨지기 쉽다. 실제로 /data(vdc)가 마운트되지 않았다.
+          # 빈 파일시스템을 새로 만든다 — 안드로이드가 첫 부팅에 알아서 채운다.
+          #
+          # metadata_csum / 64bit 는 끈다. Android 7 시절 e2fsprogs·fs_mgr 이 모르는
+          # 기능이라 켜져 있으면 마운트나 fsck 단계에서 거부당할 수 있다.
+          MKE2FS_OPTS="-q -F -O ^metadata_csum,^64bit -b 4096"
+          mkfs.ext4 $MKE2FS_OPTS -L cache "$WORK/cache.img" 256M
+          mkfs.ext4 $MKE2FS_OPTS -L data  "$WORK/userdata.img" "$USERDATA_SIZE"
 
-          if [ -f "$SYSIMG/userdata.img" ]; then cp "$SYSIMG/userdata.img" "$WORK/userdata.img"; fi
-          truncate -s "$USERDATA_SIZE" "$WORK/userdata.img"
-          # truncate 는 파일만 늘린다. 슈퍼블록이 예전 크기를 가리키면 게스트가 늘어난
-          # 공간을 못 쓰므로 파일시스템도 같이 키운다.
-          e2fsck -fy "$WORK/userdata.img" >/dev/null 2>&1 || true
-          resize2fs "$WORK/userdata.img" >/dev/null 2>&1 || echo "resize2fs 실패 (무시)"
+          for img in cache userdata; do
+            printf '%-14s %s\n' "$img.img" "$(file -b "$WORK/$img.img")"
+            e2fsck -fn "$WORK/$img.img" >/dev/null 2>&1 && echo "   fsck OK" || echo "   fsck 경고"
+          done
+
+          # 게스트가 어떤 장치를 기대하는지 직접 확인한다. 추측할 필요가 없다.
+          for f in fstab.ranchu fstab.goldfish; do
+            if [ -f "$WORK/rd/$f" ]; then
+              echo "=== $f ==="; cat "$WORK/rd/$f"
+            fi
+          done
 
           # 여기서 zip 으로 묶지 않는다. upload-artifact 가 어차피 zip 으로 감싸므로,
           # 미리 묶으면 zip 안에 zip 이 들어가 임포터가 kernel 을 찾지 못한다.
