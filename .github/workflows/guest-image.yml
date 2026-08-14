@@ -80,6 +80,49 @@ jobs:
             guest/init_wrapper/build.sh "$GITHUB_WORKSPACE/init.wrapper"
           file "$GITHUB_WORKSPACE/init.wrapper"
 
+      # SDK 의 kernel-ranchu 는 goldfish 보드용이라 -machine virt 에서 무음으로 죽는다(실측).
+      # Debian 대조군으로 나머지 배관은 정상임을 확인했고, 거기서 안드로이드 init 이
+      # SELinux 부재로 죽는 것까지 봤다. 그래서 필요한 건 "virt 에서 뜨면서 안드로이드
+      # 기능이 켜진 ARM32 커널" 하나다. ashmem 이 5.18 에서 제거됐으므로 5.10 을 쓴다.
+      - name: Build Android-capable ARM32 kernel for virt
+        id: kbuild
+        continue-on-error: true
+        env:
+          KERNEL_BRANCH: android12-5.10-lts
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq gcc-arm-linux-gnueabihf bc bison flex libssl-dev
+          git clone --depth 1 -b "$KERNEL_BRANCH" \
+            https://android.googlesource.com/kernel/common kernel-src
+          cd kernel-src
+          export ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf-
+          make -s multi_v7_defconfig
+
+          # 안드로이드가 요구하는 것 + 우리 가상 하드웨어. 위 실측에서 나온 목록 그대로.
+          ./scripts/config \
+            --enable SECURITY --enable SECURITY_SELINUX --enable SECURITY_SELINUX_BOOTPARAM \
+            --enable SECURITY_NETWORK --enable AUDIT \
+            --enable ANDROID --enable ANDROID_BINDER_IPC --enable ANDROID_BINDERFS \
+            --set-str ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
+            --enable ASHMEM \
+            --enable VIRTIO --enable VIRTIO_MMIO --enable VIRTIO_BLK \
+            --enable VIRTIO_CONSOLE --enable VIRTIO_NET \
+            --enable SERIAL_AMBA_PL011 --enable SERIAL_AMBA_PL011_CONSOLE \
+            --enable SERIAL_EARLYCON --enable BLK_DEV_INITRD \
+            --enable DEVTMPFS --enable DEVTMPFS_MOUNT \
+            --enable EXT4_FS --enable EXT4_USE_FOR_EXT2 \
+            --disable MODULES
+          make -s olddefconfig
+
+          # 내장인지 확인한다. 모듈이면 램디스크에 모듈이 없어 아무 소용이 없다.
+          for opt in CONFIG_VIRTIO_CONSOLE CONFIG_SECURITY_SELINUX CONFIG_ANDROID_BINDER_IPC CONFIG_ASHMEM; do
+            printf '%-32s %s\n' "$opt" "$(grep -E "^$opt=" .config || echo '없음!')"
+          done
+
+          make -j"$(nproc)" zImage
+          cp arch/arm/boot/zImage "$GITHUB_WORKSPACE/kernel-virt-android"
+          file "$GITHUB_WORKSPACE/kernel-virt-android"
+
       - name: Assemble guest images
         env:
           USERDATA_SIZE: ${{ inputs.userdata_size || '2G' }}
@@ -89,10 +132,17 @@ jobs:
           mkdir -p "$WORK"
 
           # --- kernel ---
+          # 직접 빌드한 virt 용 커널이 있으면 그것이 우선. SDK 의 kernel-ranchu 는
+          # -machine virt 에서 부팅하지 못하는 것이 실측으로 확인됐다(무음 종료).
           KERNEL=""
-          for name in kernel-ranchu kernel-qemu kernel; do
-            if [ -f "$SYSIMG/$name" ]; then KERNEL="$SYSIMG/$name"; break; fi
-          done
+          if [ -f "$GITHUB_WORKSPACE/kernel-virt-android" ]; then
+            KERNEL="$GITHUB_WORKSPACE/kernel-virt-android"
+          else
+            echo "::warning::직접 빌드한 커널이 없어 SDK kernel-ranchu 로 폴백합니다 (부팅 실패가 예상됨)"
+            for name in kernel-ranchu kernel-qemu kernel; do
+              if [ -f "$SYSIMG/$name" ]; then KERNEL="$SYSIMG/$name"; break; fi
+            done
+          fi
           if [ -z "$KERNEL" ]; then
             echo "::error::시스템 이미지 패키지에 커널이 없습니다. 위 inspect 출력 확인 필요."
             exit 1
@@ -206,8 +256,8 @@ jobs:
             } | tee -a "$GITHUB_STEP_SUMMARY"
           }
 
-          # 1) SDK 의 kernel-ranchu — goldfish 하드웨어용이라 virt 에서 뜨는지 확인
-          boot_with sdk-ranchu "$WORK/kernel"
+          # 1) 실제로 패키징되는 커널 (직접 빌드한 virt 용, 없으면 SDK 폴백)
+          boot_with packaged "$WORK/kernel"
 
           # 2) 검증된 대조군: Debian armhf 넷부트 커널. multi_v7 기반이라 QEMU virt 를
           #    지원하고 PL011 · virtio-mmio · virtio-console 이 들어 있다. 안드로이드는
