@@ -268,7 +268,7 @@ jobs:
       - name: Smoke boot the guest under QEMU
         continue-on-error: true
         env:
-          BOOT_SECONDS: "900"
+          BOOT_SECONDS: "420"
         run: |
           sudo apt-get install -y -qq qemu-system-arm
           WORK="$GITHUB_WORKSPACE/guest-out"
@@ -408,9 +408,9 @@ jobs:
               | sed 's/^\[[0-9. ]*\] //' | awk '!b[$0]++' | tail -14
 
             echo "  --- 죽은 서비스가 남긴 말 ---"
-            grep -aE "servicemanager|binder:|Binder|context manager|Terminating|exited with status|killed by signal|SELinux: Failed" "$f" \
-              | grep -avE "init\.wrapper: wd |Starting service" \
-              | sed 's/^\[[0-9. ]*\] //' | awk '!s[$0]++' | tail -18
+            grep -aE "Abort message|surfaceflinger|SurfaceFlinger|gralloc|hwcomposer|qemu_pipe|libEGL|EGL_|eglInitialize|HAL module|hw_get_module|Terminating|exited with status|killed by signal|SELinux: Failed|servicemanager" "$f" \
+              | grep -avE "init\.wrapper: wd |Starting service|killed by signal 9" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!s[$0]++' | tail -26
 
             echo "  --- 감시자 마지막 상태 ---"
             grep -a "init\.wrapper: wd t=.* mnt:" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!m[$0]++' | tail -2
