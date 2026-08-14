@@ -107,6 +107,7 @@ jobs:
             --enable ANDROID --enable ANDROID_BINDER_IPC --enable ANDROID_BINDERFS \
             --set-str ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
             --enable ASHMEM \
+            --enable POWER_SUPPLY --enable TEST_POWER \
             --enable VIRTIO --enable VIRTIO_MMIO --enable VIRTIO_BLK \
             --enable VIRTIO_CONSOLE --enable VIRTIO_NET \
             --enable SERIAL_AMBA_PL011 --enable SERIAL_AMBA_PL011_CONSOLE \
@@ -172,6 +173,20 @@ jobs:
           esac
           cp "$GITHUB_WORKSPACE/init.wrapper" ./init.wrapper
           chmod 750 ./init.wrapper
+
+          # healthd 는 goldfish 배터리를 읽는데 -machine virt 에는 없어서 abort 한다.
+          # critical 이라 4번 죽으면 init 이 recovery 로 재부팅해 그 뒤를 볼 수 없다.
+          # 플래그만 떼어내 부팅이 계속되게 한다. healthd 자체 오류는 logcat 으로 가서
+          # 시리얼에 안 보이므로, 이렇게 해야 다음 단계가 드러난다.
+          if [ -f init.rc ]; then
+            awk '
+              /^service[ \t]+healthd/ { inblk=1 }
+              inblk && /^[ \t]*critical[ \t]*$/ { print "# critical (removed: no battery device on -machine virt)"; next }
+              /^service[ \t]/ && !/healthd/ { inblk=0 }
+              { print }
+            ' init.rc > init.rc.new && mv init.rc.new init.rc
+            echo "init.rc healthd 블록:"; awk '/^service[ \t]+healthd/,/^$/' init.rc | head -10
+          fi
           find . | cpio -o -H newc | gzip > "$WORK/ramdisk.img"
           cd "$GITHUB_WORKSPACE"
 
