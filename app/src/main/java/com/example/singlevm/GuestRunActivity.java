@@ -2,12 +2,14 @@ package com.example.singlevm;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -41,6 +43,14 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     public static final String EXTRA_PACKAGE = "package";
     private static final long FRAME_TICK_DELAY_MS = 700;
     private static final int FRAME_TICK_LIMIT = 8;
+    /**
+     * Number of virtio-serial pipes wired between host and guest. jadx had collapsed this into
+     * FRAME_TICK_LIMIT because both happen to be 8; they are unrelated.
+     */
+    private static final int TRANSPORT_PIPE_COUNT = 8;
+    private static final long GUEST_DIAGNOSTICS_DELAY_MS = 60_000L;
+    private static final String GUEST_DIAGNOSTICS_COMMAND =
+            "echo VM_DIAG_FILE_BEGIN\rcat /data/local/tmp/bootdiag.log 2>&1\recho VM_DIAG_FILE_END\r";
     private static final boolean NATIVE_RUNTIME_LOADED;
     private static final String READY_TEXT = "런타임 준비 중...";
     private static volatile Process activeQemuProcess;
@@ -54,12 +64,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private boolean frameLoopRunning = false;
     private int frameTicks = 0;
     private final Handler frameHandler = new Handler(Looper.getMainLooper());
-    private final Runnable frameTicker = new Runnable() { // from class: com.example.singlevm.GuestRunActivity.1
-        @Override // java.lang.Runnable
-        public void run() {
-            GuestRunActivity.this.runFrameTick();
-        }
-    };
+    private final Runnable frameTicker = this::runFrameTick;
 
     private native String nativeAttachEmuglSurface(Surface surface);
 
@@ -75,9 +80,9 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     public native String nativeRunFrame();
 
     /* JADX INFO: Access modifiers changed from: private */
-    public native String nativeStartEmuglBridge(String str, boolean z);
+    public native String nativeStartEmuglBridge(String pipeSocketPath, boolean primaryPipe);
 
-    private native String nativeStartGuest(String str, String str2);
+    private native String nativeStartGuest(String vmRootPath, String installId);
 
     static {
         boolean loaded;
@@ -98,33 +103,34 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         EMUGL_PROBE_LOADED = emuglProbeLoaded;
     }
 
-    /* JADX WARN: Code duplicated, block: B:11:0x002f A[DONT_INVERT] */
-    /* JADX WARN: Code duplicated, block: B:12:0x0031 A[Catch: Exception -> 0x002d, TryCatch #0 {Exception -> 0x002d, blocks: (B:4:0x0004, B:6:0x000c, B:8:0x001d, B:15:0x0040, B:12:0x0031), top: B:22:0x0004 }] */
+    /**
+     * Called from native code: opens {@code path} (a filesystem path or a {@code content://} URI)
+     * and hands the raw file descriptor over to the caller, which then owns it.
+     *
+     * @return the detached fd, or -1 if the path could not be opened.
+     */
     public int get_fd(String path) {
-        ParcelFileDescriptor descriptor = null;
         if (path == null) {
-            if (path != null) {
-                descriptor = ParcelFileDescriptor.open(new File(path), 805306368);
-            }
-        } else {
-            try {
-                if (path.startsWith("content://")) {
-                    descriptor = getContentResolver().openFileDescriptor(Uri.parse(path), "rw");
-                    if (descriptor == null) {
-                        descriptor = getContentResolver().openFileDescriptor(Uri.parse(path), "r");
-                    }
-                } else if (path != null) {
-                    descriptor = ParcelFileDescriptor.open(new File(path), 805306368);
+            return -1;
+        }
+        ParcelFileDescriptor descriptor = null;
+        try {
+            if (path.startsWith("content://")) {
+                descriptor = getContentResolver().openFileDescriptor(Uri.parse(path), "rw");
+                if (descriptor == null) {
+                    descriptor = getContentResolver().openFileDescriptor(Uri.parse(path), "r");
                 }
-            } catch (Exception e) {
-                if (descriptor != null) {
-                    try {
-                        descriptor.close();
-                    } catch (IOException e2) {
-                    }
-                }
-                return -1;
+            } else {
+                descriptor = ParcelFileDescriptor.open(new File(path), ParcelFileDescriptor.MODE_READ_WRITE);
             }
+        } catch (Exception e) {
+            if (descriptor != null) {
+                try {
+                    descriptor.close();
+                } catch (IOException ignored) {
+                }
+            }
+            return -1;
         }
         if (descriptor == null) {
             return -1;
@@ -171,27 +177,27 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(Color.rgb(18, 18, 18));
         LinearLayout root = new LinearLayout(this);
-        root.setOrientation(1);
+        root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(18), dp(22), dp(18), dp(18));
         scrollView.addView(root, new FrameLayout.LayoutParams(-1, -2));
         TextView title = new TextView(this);
         title.setText(getExtra(EXTRA_LABEL, "게임"));
         title.setTextSize(24.0f);
-        title.setTypeface(Typeface.DEFAULT, 1);
-        title.setTextColor(-1);
-        title.setGravity(1);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setTextColor(Color.WHITE);
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(title, new LinearLayout.LayoutParams(-1, -2));
         TextView subtitle = new TextView(this);
         subtitle.setText(this.engineAdapter.displayName());
         subtitle.setTextSize(14.0f);
         subtitle.setTextColor(Color.rgb(155, 155, 155));
-        subtitle.setGravity(1);
+        subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
         subtitle.setPadding(0, dp(6), 0, dp(18));
         root.addView(subtitle, new LinearLayout.LayoutParams(-1, -2));
         SurfaceView surfaceView = new SurfaceView(this);
-        surfaceView.setBackgroundColor(-16777216);
+        surfaceView.setBackgroundColor(Color.BLACK);
         surfaceView.setZOrderOnTop(true);
-        surfaceView.getHolder().setFormat(1);
+        surfaceView.getHolder().setFormat(PixelFormat.RGBA_8888);
         surfaceView.getHolder().addCallback(this);
         LinearLayout.LayoutParams surfaceParams = new LinearLayout.LayoutParams(-1, dp(320));
         surfaceParams.setMargins(0, 0, 0, dp(14));
@@ -251,40 +257,33 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         this.frameHandler.removeCallbacks(this.frameTicker);
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
-    public void runFrameTick() {
+    private void runFrameTick() {
         if (!this.frameLoopRunning || !NATIVE_RUNTIME_LOADED) {
             return;
         }
         if (this.frameTicks >= FRAME_TICK_LIMIT) {
             this.frameLoopRunning = false;
-            appendRuntimeLog("\n\nframe loop: stopped after 8 ticks");
-        } else {
-            this.frameTicks++;
-            new Thread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.2
-                @Override // java.lang.Runnable
-                public void run() {
-                    String result;
-                    try {
-                        result = GuestRunActivity.this.nativeRunFrame();
-                    } catch (RuntimeException e) {
-                        result = "nativeRunFrame failed: " + e.getMessage();
-                    } catch (UnsatisfiedLinkError e2) {
-                        result = "nativeRunFrame JNI missing: " + e2.getMessage();
-                    }
-                    final String output = "\n\n" + result;
-                    GuestRunActivity.this.runOnUiThread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.2.1
-                        @Override // java.lang.Runnable
-                        public void run() {
-                            if (GuestRunActivity.this.frameLoopRunning) {
-                                GuestRunActivity.this.appendRuntimeLog(output);
-                                GuestRunActivity.this.frameHandler.postDelayed(GuestRunActivity.this.frameTicker, GuestRunActivity.FRAME_TICK_DELAY_MS);
-                            }
-                        }
-                    });
-                }
-            }, "single-vm-frame-tick").start();
+            appendRuntimeLog("\n\nframe loop: stopped after " + FRAME_TICK_LIMIT + " ticks");
+            return;
         }
+        this.frameTicks++;
+        new Thread(() -> {
+            String result;
+            try {
+                result = nativeRunFrame();
+            } catch (RuntimeException e) {
+                result = "nativeRunFrame failed: " + e.getMessage();
+            } catch (UnsatisfiedLinkError e) {
+                result = "nativeRunFrame JNI missing: " + e.getMessage();
+            }
+            final String output = "\n\n" + result;
+            runOnUiThread(() -> {
+                if (this.frameLoopRunning) {
+                    appendRuntimeLog(output);
+                    this.frameHandler.postDelayed(this.frameTicker, FRAME_TICK_DELAY_MS);
+                }
+            });
+        }, "single-vm-frame-tick").start();
     }
 
     @Override // android.view.SurfaceHolder.Callback
@@ -390,9 +389,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         }
         command.add("-device");
         command.add("virtio-serial-pci,disable-legacy=on");
-        int pipeIndex = 0;
-        while (pipeIndex < FRAME_TICK_LIMIT) {
-            File nativeDir2 = nativeDir;
+        for (int pipeIndex = 0; pipeIndex < TRANSPORT_PIPE_COUNT; pipeIndex++) {
             File pipeSocket = new File(transportDir, "pipe" + pipeIndex + ".sock");
             if (pipeSocket.exists()) {
                 pipeSocket.delete();
@@ -402,9 +399,6 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
             command.add("socket,id=" + pipeId + ",path=" + pipeSocket.getAbsolutePath() + ",server=on,wait=off");
             command.add("-device");
             command.add("virtserialport,chardev=" + pipeId + ",name=org.singlevm.pipe." + pipeIndex);
-            pipeIndex++;
-            nativeDir = nativeDir2;
-            launcher = launcher;
         }
         command.add("-monitor");
         command.add("none");
@@ -452,77 +446,65 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
 
     private void startAndroid7Guest(final List<String> command, final String vmRootPath) {
         appendRuntimeLog("\n\nQEMU_SESSION_START_REQUESTED");
-        new Thread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.3
-            @Override // java.lang.Runnable
-            public void run() {
-                String result;
-                try {
-                    File logDir = new File(vmRootPath, "logs");
-                    if (!logDir.exists()) {
-                        logDir.mkdirs();
-                    }
-                    File outputLog = new File(logDir, "qemu-modern.log");
-                    ProcessBuilder builder = new ProcessBuilder((List<String>) command);
-                    builder.directory(GuestRunActivity.this.getFilesDir());
-                    builder.environment().put("LD_LIBRARY_PATH", GuestRunActivity.this.getApplicationInfo().nativeLibraryDir + ":" + GuestRunActivity.this.getFilesDir().getAbsolutePath());
-                    builder.redirectErrorStream(true);
-                    builder.redirectOutput(outputLog);
-                    GuestRunActivity.this.qemuProcess = builder.start();
-                    Process unused = GuestRunActivity.activeQemuProcess = GuestRunActivity.this.qemuProcess;
-                    if (GuestRunActivity.EMUGL_PROBE_LOADED) {
-                        StringBuilder bridgeStatus = new StringBuilder();
-                        int pipeIndex = 0;
-                        while (pipeIndex < GuestRunActivity.FRAME_TICK_LIMIT) {
-                            String status = GuestRunActivity.this.nativeStartEmuglBridge(new File(vmRootPath, "transport/pipe" + pipeIndex + ".sock").getAbsolutePath(), pipeIndex == 0);
-                            if (bridgeStatus.length() > 0) {
-                                bridgeStatus.append('\n');
-                            }
-                            bridgeStatus.append(status);
-                            pipeIndex++;
-                        }
-                        final String bridgeResult = bridgeStatus.toString();
-                        GuestRunActivity.this.runOnUiThread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.3.1
-                            @Override // java.lang.Runnable
-                            public void run() {
-                                GuestRunActivity.this.appendRuntimeLog("\n" + bridgeResult);
-                            }
-                        });
-                    }
-                    GuestRunActivity.this.scheduleGuestDiagnostics(GuestRunActivity.this.qemuProcess);
-                    int exitCode = GuestRunActivity.this.qemuProcess.waitFor();
-                    if (GuestRunActivity.activeQemuProcess == GuestRunActivity.this.qemuProcess) {
-                        Process unused2 = GuestRunActivity.activeQemuProcess = null;
-                    }
-                    result = "QEMU_PROCESS_EXIT=" + exitCode + "\n로그: " + outputLog.getAbsolutePath();
-                } catch (IOException | InterruptedException | RuntimeException e) {
-                    Thread.currentThread().interrupt();
-                    result = "QEMU_SESSION_FAILED: " + e.getMessage();
+        new Thread(() -> {
+            String result;
+            try {
+                File logDir = new File(vmRootPath, "logs");
+                if (!logDir.exists()) {
+                    logDir.mkdirs();
                 }
-                final String output = result;
-                GuestRunActivity.this.runOnUiThread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.3.2
-                    @Override // java.lang.Runnable
-                    public void run() {
-                        GuestRunActivity.this.appendRuntimeLog("\n\n" + output);
+                File outputLog = new File(logDir, "qemu-modern.log");
+                ProcessBuilder builder = new ProcessBuilder(command);
+                builder.directory(getFilesDir());
+                builder.environment().put("LD_LIBRARY_PATH",
+                        getApplicationInfo().nativeLibraryDir + ":" + getFilesDir().getAbsolutePath());
+                builder.redirectErrorStream(true);
+                builder.redirectOutput(outputLog);
+                this.qemuProcess = builder.start();
+                activeQemuProcess = this.qemuProcess;
+                if (EMUGL_PROBE_LOADED) {
+                    StringBuilder bridgeStatus = new StringBuilder();
+                    for (int pipeIndex = 0; pipeIndex < TRANSPORT_PIPE_COUNT; pipeIndex++) {
+                        String socketPath =
+                                new File(vmRootPath, "transport/pipe" + pipeIndex + ".sock").getAbsolutePath();
+                        String status = nativeStartEmuglBridge(socketPath, pipeIndex == 0);
+                        if (bridgeStatus.length() > 0) {
+                            bridgeStatus.append('\n');
+                        }
+                        bridgeStatus.append(status);
                     }
-                });
+                    final String bridgeResult = bridgeStatus.toString();
+                    runOnUiThread(() -> appendRuntimeLog("\n" + bridgeResult));
+                }
+                scheduleGuestDiagnostics(this.qemuProcess);
+                int exitCode = this.qemuProcess.waitFor();
+                if (activeQemuProcess == this.qemuProcess) {
+                    activeQemuProcess = null;
+                }
+                result = "QEMU_PROCESS_EXIT=" + exitCode + "\n로그: " + outputLog.getAbsolutePath();
+            } catch (IOException | InterruptedException | RuntimeException e) {
+                Thread.currentThread().interrupt();
+                result = "QEMU_SESSION_FAILED: " + e.getMessage();
             }
+            final String output = result;
+            runOnUiThread(() -> appendRuntimeLog("\n\n" + output));
         }, "single-vm-qemu").start();
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
-    public void scheduleGuestDiagnostics(final Process process) {
-        new Thread(new Runnable() { // from class: com.example.singlevm.GuestRunActivity.4
-            @Override // java.lang.Runnable
-            public void run() {
-                try {
-                    Thread.sleep(60000L);
-                    if (process.isAlive()) {
-                        process.getOutputStream().write("echo VM_DIAG_FILE_BEGIN\rcat /data/local/tmp/bootdiag.log 2>&1\recho VM_DIAG_FILE_END\r".getBytes(StandardCharsets.US_ASCII));
-                        process.getOutputStream().flush();
-                    }
-                } catch (IOException | InterruptedException e) {
-                    Thread.currentThread().interrupt();
+    /**
+     * One minute after boot, pokes the guest's serial console to dump its boot diagnostics into
+     * the QEMU log. Fire-and-forget: failures are swallowed on purpose.
+     */
+    private void scheduleGuestDiagnostics(final Process process) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(GUEST_DIAGNOSTICS_DELAY_MS);
+                if (process.isAlive()) {
+                    process.getOutputStream().write(GUEST_DIAGNOSTICS_COMMAND.getBytes(StandardCharsets.US_ASCII));
+                    process.getOutputStream().flush();
                 }
+            } catch (IOException | InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }, "single-vm-guest-diagnostics").start();
     }

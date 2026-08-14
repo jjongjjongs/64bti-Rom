@@ -18,6 +18,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -59,7 +60,11 @@ public class MainActivity extends Activity {
     private static final String ACTION_IMPORT_ADB_GUEST = "com.example.singlevm.IMPORT_ADB_GUEST";
     private static final String KEY_ACTIVE_PACKAGE = "active_package";
     private static final String KEY_INSTALLED_PACKAGES = "installed_packages";
-    private static final int MANIFEST_VERSION = 1;
+    private static final int MANIFEST_SCHEMA_VERSION = 1;
+    /** Buffer used when unpacking multi-hundred-MB guest images out of a bundle zip. */
+    private static final int IMAGE_COPY_BUFFER_BYTES = 1024 * 1024;
+    /** Headroom demanded on top of the raw entry sizes before unpacking a guest image bundle. */
+    private static final long IMAGE_EXTRACT_HEADROOM_BYTES = 256L * 1024 * 1024;
     private static final boolean NATIVE_RUNTIME_LOADED;
     private static final String PREFS = "single_vm_state";
     private static final int REQUEST_IMPORT_ANDROID7_IMAGE = 7002;
@@ -79,7 +84,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private File vmRoot;
 
-    private native String nativeProbeRuntime(String str, String str2);
+    private native String nativeProbeRuntime(String vmRootPath, String installId);
 
     static {
         boolean loaded;
@@ -136,19 +141,19 @@ public class MainActivity extends Activity {
         scrollView.setFillViewport(true);
         scrollView.setBackgroundColor(Color.rgb(245, 245, 245));
         LinearLayout root = new LinearLayout(this);
-        root.setOrientation(MANIFEST_VERSION);
+        root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(14), dp(22), dp(14), dp(18));
         scrollView.addView(root, new FrameLayout.LayoutParams(-1, -2));
         TextView search = new TextView(this);
         search.setText("⌕  앱 검색");
         search.setTextSize(20.0f);
-        search.setGravity(17);
+        search.setGravity(Gravity.CENTER);
         search.setTextColor(Color.rgb(0, 150, 136));
         search.setPadding(0, dp(18), 0, dp(18));
         root.addView(search, new LinearLayout.LayoutParams(-1, -2));
         View divider = new View(this);
         divider.setBackgroundColor(Color.rgb(0, 150, 136));
-        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(MANIFEST_VERSION)));
+        root.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
         this.statusView = makePanelText(15, true);
         this.statusView.setBackgroundColor(0);
         this.statusView.setTextColor(Color.rgb(72, 72, 72));
@@ -165,7 +170,7 @@ public class MainActivity extends Activity {
         this.detailsView = makePanelText(14, false);
         this.detailsView.setPadding(dp(14), dp(12), dp(14), dp(14));
         root.addView(this.detailsView, panelParams(dp(10)));
-        this.detailsView.setVisibility(8);
+        this.detailsView.setVisibility(View.GONE);
         setContentView(scrollView);
     }
 
@@ -174,9 +179,9 @@ public class MainActivity extends Activity {
         button.setAllCaps(false);
         button.setText(text);
         button.setTextSize(16.0f);
-        button.setTextColor(-1);
+        button.setTextColor(Color.WHITE);
         button.setBackgroundColor(Color.rgb(45, 42, 43));
-        button.setGravity(17);
+        button.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(50));
         params.setMargins(0, dp(4), 0, dp(4));
         button.setLayoutParams(params);
@@ -196,7 +201,7 @@ public class MainActivity extends Activity {
         text.setTextColor(Color.rgb(42, 39, 40));
         text.setBackgroundColor(Color.rgb(255, 252, 247));
         if (bold) {
-            text.setTypeface(Typeface.DEFAULT, MANIFEST_VERSION);
+            text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         }
         return text;
     }
@@ -212,30 +217,14 @@ public class MainActivity extends Activity {
             return;
         }
         this.commandGrid.removeAllViews();
-        this.commandGrid.addView(makeCommandTile("APK 설치", "↓", Color.rgb(3, 169, 244), new View.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda1
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                this.f$0.m9lambda$refreshAppGrid$0$comexamplesinglevmMainActivity(view);
-            }
-        }));
-        this.commandGrid.addView(makeCommandTile("ADB 설치", "↓", Color.rgb(0, 150, 136), new View.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda2
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                this.f$0.m10lambda$refreshAppGrid$1$comexamplesinglevmMainActivity(view);
-            }
-        }));
-        this.commandGrid.addView(makeCommandTile("실행 전 스캔", "✓", Color.rgb(96, 125, 139), new View.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda3
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                this.f$0.m11lambda$refreshAppGrid$2$comexamplesinglevmMainActivity(view);
-            }
-        }));
-        this.commandGrid.addView(makeCommandTile("설정", "⚙", Color.rgb(117, 133, 140), new View.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda4
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                this.f$0.m12lambda$refreshAppGrid$3$comexamplesinglevmMainActivity(view);
-            }
-        }));
+        this.commandGrid.addView(makeCommandTile("APK 설치", "↓", Color.rgb(3, 169, 244),
+                v -> openApkPicker()));
+        this.commandGrid.addView(makeCommandTile("ADB 설치", "↓", Color.rgb(0, 150, 136),
+                v -> importAdbGuestApk(true)));
+        this.commandGrid.addView(makeCommandTile("실행 전 스캔", "✓", Color.rgb(96, 125, 139),
+                v -> showRuntimeProbe()));
+        this.commandGrid.addView(makeCommandTile("설정", "⚙", Color.rgb(117, 133, 140),
+                v -> showVmSettings()));
         this.appGrid.removeAllViews();
         Set<String> installed = getInstalledPackages();
         for (String installId : installed) {
@@ -243,65 +232,27 @@ public class MainActivity extends Activity {
         }
     }
 
-    /* JADX INFO: renamed from: lambda$refreshAppGrid$0$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m9lambda$refreshAppGrid$0$comexamplesinglevmMainActivity(View v) {
-        openApkPicker();
-    }
-
-    /* JADX INFO: renamed from: lambda$refreshAppGrid$1$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m10lambda$refreshAppGrid$1$comexamplesinglevmMainActivity(View v) {
-        importAdbGuestApk(true);
-    }
-
-    /* JADX INFO: renamed from: lambda$refreshAppGrid$2$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m11lambda$refreshAppGrid$2$comexamplesinglevmMainActivity(View v) {
-        showRuntimeProbe();
-    }
-
-    /* JADX INFO: renamed from: lambda$refreshAppGrid$3$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m12lambda$refreshAppGrid$3$comexamplesinglevmMainActivity(View v) {
-        showVmSettings();
-    }
-
-    private View makeInstalledAppTile(final String str) {
-        View viewMakeGlyphIcon;
-        String string = this.prefs.getString(("app." + str + ".") + GuestRunActivity.EXTRA_LABEL, str);
-        Drawable drawableLoadInstalledAppIcon = loadInstalledAppIcon(str);
-        LinearLayout linearLayoutMakeBaseTile = makeBaseTile(string);
-        if (drawableLoadInstalledAppIcon != null) {
+    private View makeInstalledAppTile(final String installId) {
+        View icon;
+        String label = this.prefs.getString(("app." + installId + ".") + GuestRunActivity.EXTRA_LABEL, installId);
+        Drawable appIcon = loadInstalledAppIcon(installId);
+        LinearLayout tile = makeBaseTile(label);
+        if (appIcon != null) {
             ImageView imageView = new ImageView(this);
-            imageView.setImageDrawable(drawableLoadInstalledAppIcon);
+            imageView.setImageDrawable(appIcon);
             imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            viewMakeGlyphIcon = imageView;
+            icon = imageView;
         } else {
-            viewMakeGlyphIcon = makeGlyphIcon(firstLetter(string), Color.rgb(63, 81, 181), false);
+            icon = makeGlyphIcon(firstLetter(label), Color.rgb(63, 81, 181), false);
         }
-        linearLayoutMakeBaseTile.addView(viewMakeGlyphIcon, new LinearLayout.LayoutParams(dp(56), dp(56)));
-        linearLayoutMakeBaseTile.addView(makeTileLabel(string));
-        linearLayoutMakeBaseTile.setOnClickListener(new View.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda5
-            @Override // android.view.View.OnClickListener
-            public final void onClick(View view) {
-                this.f$0.m7lambda$makeInstalledAppTile$4$comexamplesinglevmMainActivity(str, view);
-            }
+        tile.addView(icon, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        tile.addView(makeTileLabel(label));
+        tile.setOnClickListener(v -> showInstalledAppActions(installId));
+        tile.setOnLongClickListener(v -> {
+            showInstalledAppActions(installId);
+            return true;
         });
-        linearLayoutMakeBaseTile.setOnLongClickListener(new View.OnLongClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda6
-            @Override // android.view.View.OnLongClickListener
-            public final boolean onLongClick(View view) {
-                return this.f$0.m8lambda$makeInstalledAppTile$5$comexamplesinglevmMainActivity(str, view);
-            }
-        });
-        return linearLayoutMakeBaseTile;
-    }
-
-    /* JADX INFO: renamed from: lambda$makeInstalledAppTile$4$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m7lambda$makeInstalledAppTile$4$comexamplesinglevmMainActivity(String installId, View v) {
-        showInstalledAppActions(installId);
-    }
-
-    /* JADX INFO: renamed from: lambda$makeInstalledAppTile$5$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ boolean m8lambda$makeInstalledAppTile$5$comexamplesinglevmMainActivity(String installId, View v) {
-        showInstalledAppActions(installId);
-        return true;
+        return tile;
     }
 
     private View makeCommandTile(String label, String glyph, int color, View.OnClickListener listener) {
@@ -314,8 +265,8 @@ public class MainActivity extends Activity {
 
     private LinearLayout makeBaseTile(String label) {
         LinearLayout tile = new LinearLayout(this);
-        tile.setOrientation(MANIFEST_VERSION);
-        tile.setGravity(17);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER);
         tile.setPadding(0, 0, 0, 0);
         tile.setContentDescription(label);
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
@@ -326,19 +277,19 @@ public class MainActivity extends Activity {
         return tile;
     }
 
-    private TextView makeGlyphIcon(String str, int i, boolean z) {
-        TextView textView = new TextView(this);
-        textView.setText(str);
-        textView.setTextSize(30.0f);
-        textView.setTypeface(Typeface.DEFAULT, MANIFEST_VERSION);
-        textView.setGravity(17);
-        textView.setTextColor(-1);
-        GradientDrawable gradientDrawable = new GradientDrawable();
-        gradientDrawable.setColor(i);
-        gradientDrawable.setShape(z ? 1 : 0);
-        gradientDrawable.setCornerRadius(dp(12));
-        textView.setBackground(gradientDrawable);
-        return textView;
+    private TextView makeGlyphIcon(String glyph, int backgroundColor, boolean circular) {
+        TextView icon = new TextView(this);
+        icon.setText(glyph);
+        icon.setTextSize(30.0f);
+        icon.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        icon.setGravity(Gravity.CENTER);
+        icon.setTextColor(Color.WHITE);
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(backgroundColor);
+        background.setShape(circular ? GradientDrawable.OVAL : GradientDrawable.RECTANGLE);
+        background.setCornerRadius(dp(12));
+        icon.setBackground(background);
+        return icon;
     }
 
     private TextView makeTileLabel(String label) {
@@ -346,7 +297,7 @@ public class MainActivity extends Activity {
         text.setText(label);
         text.setTextSize(13.0f);
         text.setTextColor(Color.rgb(85, 85, 85));
-        text.setGravity(17);
+        text.setGravity(Gravity.CENTER);
         text.setMaxLines(2);
         text.setEllipsize(TextUtils.TruncateAt.END);
         text.setPadding(0, dp(8), 0, 0);
@@ -377,7 +328,7 @@ public class MainActivity extends Activity {
         if (label == null || label.trim().isEmpty()) {
             return "?";
         }
-        return label.trim().substring(0, MANIFEST_VERSION).toUpperCase(Locale.KOREA);
+        return label.trim().substring(0, 1).toUpperCase(Locale.KOREA);
     }
 
     private void showInstalledAppActions(final String installId) {
@@ -385,21 +336,16 @@ public class MainActivity extends Activity {
         String prefix = "app." + installId + ".";
         String label = this.prefs.getString(prefix + GuestRunActivity.EXTRA_LABEL, installId);
         String[] items = {"실행", "실행 전 APK 스캔", "앱 정보", "삭제"};
-        new AlertDialog.Builder(this).setTitle(label).setItems(items, new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda8
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m13xfb40c3b1(installId, dialogInterface, i);
-            }
-        }).show();
+        new AlertDialog.Builder(this)
+                .setTitle(label)
+                .setItems(items, (dialog, which) -> onInstalledAppAction(installId, which))
+                .show();
     }
 
-    /* JADX INFO: renamed from: lambda$showInstalledAppActions$6$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m13xfb40c3b1(String installId, DialogInterface dialog, int which) {
+    private void onInstalledAppAction(String installId, int which) {
         if (which == 0) {
             launchInstalledApp(installId);
-            return;
-        }
-        if (which == MANIFEST_VERSION) {
+        } else if (which == 1) {
             showRuntimeProbe();
         } else if (which == 2) {
             showInstalledAppInfo(installId);
@@ -412,30 +358,16 @@ public class MainActivity extends Activity {
         EngineAdapter engine = EngineRegistry.primary();
         EngineReadiness readiness = engine.inspect(this, this.vmRoot);
         if (!readiness.ready) {
-            new AlertDialog.Builder(this).setTitle(engine.displayName()).setMessage(readiness.summary + "\n\n" + readiness.details).setPositiveButton("구성 파일 가져오기", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda15
-                @Override // android.content.DialogInterface.OnClickListener
-                public final void onClick(DialogInterface dialogInterface, int i) {
-                    this.f$0.m5lambda$launchInstalledApp$7$comexamplesinglevmMainActivity(dialogInterface, i);
-                }
-            }).setNegativeButton("기존 시험 엔진", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda16
-                @Override // android.content.DialogInterface.OnClickListener
-                public final void onClick(DialogInterface dialogInterface, int i) {
-                    this.f$0.m6lambda$launchInstalledApp$8$comexamplesinglevmMainActivity(installId, dialogInterface, i);
-                }
-            }).show();
+            new AlertDialog.Builder(this)
+                    .setTitle(engine.displayName())
+                    .setMessage(readiness.summary + "\n\n" + readiness.details)
+                    .setPositiveButton("구성 파일 가져오기", (dialog, which) -> openAndroid7ImagePicker())
+                    .setNegativeButton("기존 시험 엔진",
+                            (dialog, which) -> launchGuestWithEngine(installId, LegacyArmEngineAdapter.ID))
+                    .show();
         } else {
             launchGuestWithEngine(installId, engine.id());
         }
-    }
-
-    /* JADX INFO: renamed from: lambda$launchInstalledApp$7$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m5lambda$launchInstalledApp$7$comexamplesinglevmMainActivity(DialogInterface dialog, int which) {
-        openAndroid7ImagePicker();
-    }
-
-    /* JADX INFO: renamed from: lambda$launchInstalledApp$8$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m6lambda$launchInstalledApp$8$comexamplesinglevmMainActivity(String installId, DialogInterface dialog, int which) {
-        launchGuestWithEngine(installId, LegacyArmEngineAdapter.ID);
     }
 
     private void launchGuestWithEngine(String installId, String engineId) {
@@ -456,17 +388,12 @@ public class MainActivity extends Activity {
     }
 
     private void showRunNotReady(String label) {
-        new AlertDialog.Builder(this).setTitle(label).setMessage("아직 실행 엔진이 준비되지 않았습니다.\n\n'실행 전 APK 스캔'에서 필요한 보완 요소를 확인할 수 있습니다.").setPositiveButton("스캔", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda7
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m14lambda$showRunNotReady$9$comexamplesinglevmMainActivity(dialogInterface, i);
-            }
-        }).setNegativeButton("확인", (DialogInterface.OnClickListener) null).show();
-    }
-
-    /* JADX INFO: renamed from: lambda$showRunNotReady$9$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m14lambda$showRunNotReady$9$comexamplesinglevmMainActivity(DialogInterface dialog, int which) {
-        showRuntimeProbe();
+        new AlertDialog.Builder(this)
+                .setTitle(label)
+                .setMessage("아직 실행 엔진이 준비되지 않았습니다.\n\n'실행 전 APK 스캔'에서 필요한 보완 요소를 확인할 수 있습니다.")
+                .setPositiveButton("스캔", (dialog, which) -> showRuntimeProbe())
+                .setNegativeButton("확인", null)
+                .show();
     }
 
     private void showInstalledAppInfo(String installId) {
@@ -478,17 +405,12 @@ public class MainActivity extends Activity {
     private void confirmDeleteInstalledApp(final String installId) {
         String prefix = "app." + installId + ".";
         String label = this.prefs.getString(prefix + GuestRunActivity.EXTRA_LABEL, installId);
-        new AlertDialog.Builder(this).setTitle("삭제").setMessage(label + "을(를) 가상폰에서 삭제할까요?").setPositiveButton("삭제", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda11
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m0x56bded1(installId, dialogInterface, i);
-            }
-        }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).show();
-    }
-
-    /* JADX INFO: renamed from: lambda$confirmDeleteInstalledApp$10$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m0x56bded1(String installId, DialogInterface dialog, int which) {
-        deleteInstalledApp(installId);
+        new AlertDialog.Builder(this)
+                .setTitle("삭제")
+                .setMessage(label + "을(를) 가상폰에서 삭제할까요?")
+                .setPositiveButton("삭제", (dialog, which) -> deleteInstalledApp(installId))
+                .setNegativeButton("취소", null)
+                .show();
     }
 
     private void deleteInstalledApp(String installId) {
@@ -504,7 +426,7 @@ public class MainActivity extends Activity {
         }
         String[] keys = {"display_name", GuestRunActivity.EXTRA_LABEL, GuestRunActivity.EXTRA_PACKAGE, "version_name", "version_code", "first_activity", "activity_count", "permission_count", GuestRunActivity.EXTRA_ABIS, "dex_count", "native_lib_count", GuestRunActivity.EXTRA_ARM32_LIB_COUNT, "arm64_lib_count", "extracted_lib_count", "asset_count", "archive_size", GuestRunActivity.EXTRA_APK_PATH, "app_dir", GuestRunActivity.EXTRA_LIB_DIR, "assets_dir", GuestRunActivity.EXTRA_DATA_DIR, "installed_at"};
         int length = keys.length;
-        for (int i = 0; i < length; i += MANIFEST_VERSION) {
+        for (int i = 0; i < length; i++) {
             String key = keys[i];
             editor.remove(prefix + key);
         }
@@ -535,27 +457,13 @@ public class MainActivity extends Activity {
         EngineReadiness primaryState = primaryEngine.inspect(this, this.vmRoot);
         EngineReadiness legacyState = EngineRegistry.legacy().inspect(this, this.vmRoot);
         String message = "가상롬 루트:\n" + this.vmRoot.getAbsolutePath() + "\n\nADB 설치 경로:\n" + this.externalGuestApk.getAbsolutePath() + "\n\n기본 엔진: " + primaryEngine.displayName() + "\n상태: " + primaryState.summary + "\n\n" + primaryState.details + "\n\n기존 시험 엔진: " + legacyState.summary + "\n\n설치된 게임 수: " + getInstalledPackages().size();
-        new AlertDialog.Builder(this).setTitle("설정").setMessage(message).setPositiveButton("확인", (DialogInterface.OnClickListener) null).setNeutralButton("Android 7 구성 가져오기", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda12
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m15lambda$showVmSettings$11$comexamplesinglevmMainActivity(dialogInterface, i);
-            }
-        }).setNegativeButton("가상롬 초기화", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda13
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m16lambda$showVmSettings$12$comexamplesinglevmMainActivity(dialogInterface, i);
-            }
-        }).show();
-    }
-
-    /* JADX INFO: renamed from: lambda$showVmSettings$11$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m15lambda$showVmSettings$11$comexamplesinglevmMainActivity(DialogInterface dialog, int which) {
-        openAndroid7ImagePicker();
-    }
-
-    /* JADX INFO: renamed from: lambda$showVmSettings$12$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m16lambda$showVmSettings$12$comexamplesinglevmMainActivity(DialogInterface dialog, int which) {
-        confirmReset();
+        new AlertDialog.Builder(this)
+                .setTitle("설정")
+                .setMessage(message)
+                .setPositiveButton("확인", null)
+                .setNeutralButton("Android 7 구성 가져오기", (dialog, which) -> openAndroid7ImagePicker())
+                .setNegativeButton("가상롬 초기화", (dialog, which) -> confirmReset())
+                .show();
     }
 
     private void openAndroid7ImagePicker() {
@@ -563,7 +471,7 @@ public class MainActivity extends Activity {
         intent.addCategory("android.intent.category.OPENABLE");
         intent.setType("*/*");
         intent.putExtra("android.intent.extra.MIME_TYPES", new String[]{"application/zip", "application/octet-stream"});
-        intent.addFlags(MANIFEST_VERSION);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivityForResult(intent, REQUEST_IMPORT_ANDROID7_IMAGE);
     }
 
@@ -572,17 +480,17 @@ public class MainActivity extends Activity {
         intent.addCategory("android.intent.category.OPENABLE");
         intent.setType("*/*");
         intent.putExtra("android.intent.extra.MIME_TYPES", new String[]{"application/vnd.android.package-archive", "application/octet-stream"});
-        intent.addFlags(MANIFEST_VERSION);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivityForResult(intent, REQUEST_IMPORT_APK);
     }
 
     @Override // android.app.Activity
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_IMPORT_APK && resultCode == -1 && data != null) {
+        if (requestCode == REQUEST_IMPORT_APK && resultCode == RESULT_OK && data != null) {
             Uri uri = data.getData();
             if (uri == null) {
-                m2x16efb73e("APK 파일을 읽을 수 없습니다.");
+                showToast("APK 파일을 읽을 수 없습니다.");
                 return;
             }
             try {
@@ -593,10 +501,10 @@ public class MainActivity extends Activity {
                 return;
             }
         }
-        if (requestCode == REQUEST_IMPORT_ANDROID7_IMAGE && resultCode == -1 && data != null) {
+        if (requestCode == REQUEST_IMPORT_ANDROID7_IMAGE && resultCode == RESULT_OK && data != null) {
             Uri uri2 = data.getData();
             if (uri2 == null) {
-                m2x16efb73e("구성 파일을 읽을 수 없습니다.");
+                showToast("구성 파일을 읽을 수 없습니다.");
             } else {
                 importAndroid7ImageAsync(uri2);
             }
@@ -604,39 +512,16 @@ public class MainActivity extends Activity {
     }
 
     private void importAndroid7ImageAsync(final Uri uri) {
-        m2x16efb73e("Android 7 구성 파일을 확인하는 중입니다.");
-        new Thread(new Runnable() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda14
-            @Override // java.lang.Runnable
-            public final void run() {
-                this.f$0.m4xe4a136c0(uri);
+        showToast("Android 7 구성 파일을 확인하는 중입니다.");
+        new Thread(() -> {
+            try {
+                final String result = importAndroid7Image(uri);
+                runOnUiThread(() -> showToast(result));
+            } catch (IOException e) {
+                final String message = e.getMessage();
+                runOnUiThread(() -> showError("Android 7 구성 가져오기 실패", message));
             }
         }, "android7-image-import").start();
-    }
-
-    /* JADX INFO: renamed from: lambda$importAndroid7ImageAsync$15$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m4xe4a136c0(Uri uri) {
-        try {
-            final String result = importAndroid7Image(uri);
-            runOnUiThread(new Runnable() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda9
-                @Override // java.lang.Runnable
-                public final void run() {
-                    this.f$0.m2x16efb73e(result);
-                }
-            });
-        } catch (IOException e) {
-            final String message = e.getMessage();
-            runOnUiThread(new Runnable() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda10
-                @Override // java.lang.Runnable
-                public final void run() {
-                    this.f$0.m3x7dc876ff(message);
-                }
-            });
-        }
-    }
-
-    /* JADX INFO: renamed from: lambda$importAndroid7ImageAsync$14$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m3x7dc876ff(String message) {
-        showError("Android 7 구성 가져오기 실패", message);
     }
 
     private String importAndroid7Image(Uri uri) throws IOException {
@@ -679,7 +564,8 @@ public class MainActivity extends Activity {
                 if (kernel == null || ramdisk == null || system == null) {
                     throw new IOException("ZIP에 kernel-ranchu/kernel-qemu, ramdisk.img, system.img가 필요합니다.");
                 }
-                long required = positiveSize(kernel) + positiveSize(ramdisk) + positiveSize(system) + positiveSize(userdata) + 268435456;
+                long required = positiveSize(kernel) + positiveSize(ramdisk) + positiveSize(system)
+                        + positiveSize(userdata) + IMAGE_EXTRACT_HEADROOM_BYTES;
                 if (required > 0 && this.android7ImageDir.getUsableSpace() < required) {
                     throw new IOException("압축 해제 공간이 부족합니다. 최소 " + humanSize(required) + "가 필요합니다.");
                 }
@@ -717,7 +603,7 @@ public class MainActivity extends Activity {
             if (!entry.isDirectory()) {
                 String name = entry.getName().replace('\\', '/');
                 int slash = name.lastIndexOf(47);
-                String baseName = slash >= 0 ? name.substring(slash + MANIFEST_VERSION) : name;
+                String baseName = slash >= 0 ? name.substring(slash + 1) : name;
                 if (baseName.equalsIgnoreCase(fileName)) {
                     return entry;
                 }
@@ -743,59 +629,31 @@ public class MainActivity extends Activity {
         return bytes + " bytes";
     }
 
-    /* JADX WARN: Code duplicated, block: B:50:0x00ce A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    /**
+     * Streams one zip entry to {@code destination} through a {@code .part} sidecar file so a
+     * failed or interrupted extraction never leaves a half-written image behind.
+     */
     private void extractZipEntry(ZipFile zip, ZipEntry entry, File destination) throws IOException {
         File partial = new File(destination.getParentFile(), destination.getName() + ".part");
         if (partial.exists() && !partial.delete()) {
             throw new IOException(partial.getName() + " 임시 파일을 정리할 수 없습니다.");
         }
         try {
-            InputStream input = zip.getInputStream(entry);
-            try {
-                OutputStream output = new FileOutputStream(partial);
-                try {
-                    byte[] buffer = new byte[1048576];
-                    while (true) {
-                        int read = input.read(buffer);
-                        if (read == -1) {
-                            break;
-                        } else {
-                            output.write(buffer, 0, read);
-                        }
-                        if (input != null) {
-                            try {
-                                input.close();
-                            } catch (Throwable th) {
-                                th.addSuppressed(th);
-                            }
-                        }
-                        throw th;
-                    }
-                    output.close();
-                    if (input != null) {
-                        input.close();
-                    }
-                    if (destination.exists() && !destination.delete()) {
-                        partial.delete();
-                        throw new IOException(destination.getName() + " 기존 파일을 교체할 수 없습니다.");
-                    }
-                    if (!partial.renameTo(destination)) {
-                        partial.delete();
-                        throw new IOException(destination.getName() + " 파일을 확정할 수 없습니다.");
-                    }
-                } catch (Throwable th2) {
-                    try {
-                        output.close();
-                    } catch (Throwable th3) {
-                        th2.addSuppressed(th3);
-                    }
-                    throw th2;
+            try (InputStream input = zip.getInputStream(entry);
+                 OutputStream output = new FileOutputStream(partial)) {
+                byte[] buffer = new byte[IMAGE_COPY_BUFFER_BYTES];
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    output.write(buffer, 0, read);
                 }
-            } catch (Throwable th4) {
-                if (input != null) {
-                    input.close();
-                }
-                throw th4;
+            }
+            if (destination.exists() && !destination.delete()) {
+                partial.delete();
+                throw new IOException(destination.getName() + " 기존 파일을 교체할 수 없습니다.");
+            }
+            if (!partial.renameTo(destination)) {
+                partial.delete();
+                throw new IOException(destination.getName() + " 파일을 확정할 수 없습니다.");
             }
         } catch (IOException e) {
             partial.delete();
@@ -838,7 +696,7 @@ public class MainActivity extends Activity {
         File apkFile = new File(this.apkDir, "guest.apk");
         copyUriToFile(uri, apkFile);
         finishImportApk(apkFile, displayName);
-        m2x16efb73e("APK를 단일 가상롬 저장소에 가져왔습니다.");
+        showToast("APK를 단일 가상롬 저장소에 가져왔습니다.");
     }
 
     private void importAdbGuestApk(boolean showMissingDialog) {
@@ -854,7 +712,7 @@ public class MainActivity extends Activity {
             File apkFile = new File(this.apkDir, "guest.apk");
             copyFileToFile(this.externalGuestApk, apkFile);
             finishImportApk(apkFile, this.externalGuestApk.getName());
-            m2x16efb73e("ADB guest.apk를 가져왔습니다.");
+            showToast("ADB guest.apk를 가져왔습니다.");
         } catch (IOException e) {
             showError("ADB APK 가져오기 실패", e.getMessage());
         }
@@ -912,31 +770,32 @@ public class MainActivity extends Activity {
         report.archiveSize = apkFile.length();
         ZipFile zip = new ZipFile(apkFile);
         try {
-            report.validApk = zip.getEntry("AndroidManifest.xml") != null ? MANIFEST_VERSION : false;
+            report.validApk = zip.getEntry("AndroidManifest.xml") != null;
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
                 if (name.equals("classes.dex") || name.matches("classes\\d+\\.dex")) {
-                    report.dexCount += MANIFEST_VERSION;
+                    report.dexCount++;
                 }
                 if (name.startsWith("lib/") && name.endsWith(".so")) {
                     String[] parts = name.split("/");
                     if (parts.length >= 3) {
-                        report.abis.add(parts[MANIFEST_VERSION]);
-                        report.nativeLibCount += MANIFEST_VERSION;
-                        if ("armeabi".equals(parts[MANIFEST_VERSION]) || "armeabi-v7a".equals(parts[MANIFEST_VERSION])) {
-                            report.arm32LibCount += MANIFEST_VERSION;
+                        report.abis.add(parts[1]);
+                        report.nativeLibCount++;
+                        if ("armeabi".equals(parts[1]) || "armeabi-v7a".equals(parts[1])) {
+                            report.arm32LibCount++;
                         }
-                        if ("arm64-v8a".equals(parts[MANIFEST_VERSION])) {
-                            report.arm64LibCount += MANIFEST_VERSION;
+                        if ("arm64-v8a".equals(parts[1])) {
+                            report.arm64LibCount++;
                         }
                     }
                 }
             }
             zip.close();
             PackageManager pm = getPackageManager();
-            PackageInfo info = pm.getPackageArchiveInfo(apkFile.getAbsolutePath(), 4225);
+            PackageInfo info = pm.getPackageArchiveInfo(apkFile.getAbsolutePath(),
+                    PackageManager.GET_ACTIVITIES | PackageManager.GET_META_DATA | PackageManager.GET_PERMISSIONS);
             if (info == null) {
                 report.validApk = false;
                 return report;
@@ -981,7 +840,7 @@ public class MainActivity extends Activity {
                 if (!entry.isDirectory() && name.startsWith("lib/") && name.endsWith(".so")) {
                     String[] parts = name.split("/");
                     if (parts.length >= 3) {
-                        String abi = parts[MANIFEST_VERSION];
+                        String abi = parts[1];
                         if ("armeabi".equals(abi) || "armeabi-v7a".equals(abi)) {
                             File abiDir = new File(targetLibDir, abi);
                             if (!abiDir.exists() && !abiDir.mkdirs()) {
@@ -997,7 +856,7 @@ public class MainActivity extends Activity {
                                     if (in != null) {
                                         in.close();
                                     }
-                                    count += MANIFEST_VERSION;
+                                    count++;
                                 } catch (Throwable th) {
                                     try {
                                         output.close();
@@ -1057,7 +916,7 @@ public class MainActivity extends Activity {
                                 if (in != null) {
                                     in.close();
                                 }
-                                count += MANIFEST_VERSION;
+                                count++;
                             } catch (Throwable th) {
                                 try {
                                     output.close();
@@ -1150,21 +1009,20 @@ public class MainActivity extends Activity {
     }
 
     private void confirmReset() {
-        new AlertDialog.Builder(this).setTitle("가상롬 초기화").setMessage("가져온 APK와 추출된 라이브러리, 단일 가상롬 데이터 영역을 삭제합니다.").setPositiveButton("초기화", new DialogInterface.OnClickListener() { // from class: com.example.singlevm.MainActivity$$ExternalSyntheticLambda0
-            @Override // android.content.DialogInterface.OnClickListener
-            public final void onClick(DialogInterface dialogInterface, int i) {
-                this.f$0.m1lambda$confirmReset$16$comexamplesinglevmMainActivity(dialogInterface, i);
-            }
-        }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).show();
+        new AlertDialog.Builder(this)
+                .setTitle("가상롬 초기화")
+                .setMessage("가져온 APK와 추출된 라이브러리, 단일 가상롬 데이터 영역을 삭제합니다.")
+                .setPositiveButton("초기화", (dialog, which) -> resetVm())
+                .setNegativeButton("취소", null)
+                .show();
     }
 
-    /* JADX INFO: renamed from: lambda$confirmReset$16$com-example-singlevm-MainActivity, reason: not valid java name */
-    /* synthetic */ void m1lambda$confirmReset$16$comexamplesinglevmMainActivity(DialogInterface dialog, int which) {
+    private void resetVm() {
         clearDirectory(this.vmRoot);
         this.prefs.edit().clear().apply();
         ensureVmDirs();
         refreshState();
-        m2x16efb73e("가상롬을 초기화했습니다.");
+        showToast("가상롬을 초기화했습니다.");
     }
 
     private void ensureVmDirs() {
@@ -1296,7 +1154,7 @@ public class MainActivity extends Activity {
         }
         if (file.isDirectory() && (children = file.listFiles()) != null) {
             int length = children.length;
-            for (int i = 0; i < length; i += MANIFEST_VERSION) {
+            for (int i = 0; i < length; i++) {
                 File child = children[i];
                 clearDirectory(child);
             }
@@ -1335,7 +1193,7 @@ public class MainActivity extends Activity {
                 apps.put(installId);
             }
             manifest.put("schema", "single-vm");
-            manifest.put("version", MANIFEST_VERSION);
+            manifest.put("version", MANIFEST_SCHEMA_VERSION);
             manifest.put("updated_at", now());
             manifest.put("vm_root", this.vmRoot.getAbsolutePath());
             manifest.put("apps_dir", this.appsDir.getAbsolutePath());
@@ -1356,57 +1214,33 @@ public class MainActivity extends Activity {
             }
             JSONObject manifest = new JSONObject();
             manifest.put("schema", "single-vm-app");
-            manifest.put("version", MANIFEST_VERSION);
-            try {
-                manifest.put(GuestRunActivity.EXTRA_INSTALL_ID, installId);
-                manifest.put("display_name", displayName);
-                manifest.put(GuestRunActivity.EXTRA_LABEL, emptyToFallback(report.appLabel, displayName));
-                manifest.put(GuestRunActivity.EXTRA_PACKAGE, report.packageName);
-                manifest.put("version_name", report.versionName);
-                manifest.put("version_code", report.versionCode);
-                manifest.put("first_activity", report.firstActivity);
-                manifest.put("activity_count", report.activityCount);
-                manifest.put("permission_count", report.permissionCount);
-                manifest.put("dex_count", report.dexCount);
-                manifest.put("native_lib_count", report.nativeLibCount);
-                manifest.put(GuestRunActivity.EXTRA_ARM32_LIB_COUNT, report.arm32LibCount);
-                manifest.put("arm64_lib_count", report.arm64LibCount);
-                try {
-                    manifest.put("extracted_lib_count", extractedLibs);
-                    try {
-                        manifest.put("asset_count", extractedAssets);
-                        manifest.put("archive_size", report.archiveSize);
-                        manifest.put(GuestRunActivity.EXTRA_ABIS, abis);
-                        manifest.put(GuestRunActivity.EXTRA_APK_PATH, apkFile.getAbsolutePath());
-                        manifest.put("app_dir", appDir.getAbsolutePath());
-                        manifest.put(GuestRunActivity.EXTRA_LIB_DIR, appLibDir.getAbsolutePath());
-                        manifest.put("assets_dir", appAssetsDir.getAbsolutePath());
-                        manifest.put(GuestRunActivity.EXTRA_DATA_DIR, appDataDir.getAbsolutePath());
-                        try {
-                            manifest.put("installed_at", installedAt);
-                            try {
-                                writeJsonFile(new File(appDir, "manifest.json"), manifest);
-                            } catch (JSONException e) {
-                                e = e;
-                                throw new IOException("App manifest JSON creation failed", e);
-                            }
-                        } catch (JSONException e2) {
-                            e = e2;
-                        }
-                    } catch (JSONException e3) {
-                        e = e3;
-                        throw new IOException("App manifest JSON creation failed", e);
-                    }
-                } catch (JSONException e4) {
-                    e = e4;
-                    throw new IOException("App manifest JSON creation failed", e);
-                }
-            } catch (JSONException e5) {
-                e = e5;
-                throw new IOException("App manifest JSON creation failed", e);
-            }
-        } catch (JSONException e6) {
-            e = e6;
+            manifest.put("version", MANIFEST_SCHEMA_VERSION);
+            manifest.put(GuestRunActivity.EXTRA_INSTALL_ID, installId);
+            manifest.put("display_name", displayName);
+            manifest.put(GuestRunActivity.EXTRA_LABEL, emptyToFallback(report.appLabel, displayName));
+            manifest.put(GuestRunActivity.EXTRA_PACKAGE, report.packageName);
+            manifest.put("version_name", report.versionName);
+            manifest.put("version_code", report.versionCode);
+            manifest.put("first_activity", report.firstActivity);
+            manifest.put("activity_count", report.activityCount);
+            manifest.put("permission_count", report.permissionCount);
+            manifest.put("dex_count", report.dexCount);
+            manifest.put("native_lib_count", report.nativeLibCount);
+            manifest.put(GuestRunActivity.EXTRA_ARM32_LIB_COUNT, report.arm32LibCount);
+            manifest.put("arm64_lib_count", report.arm64LibCount);
+            manifest.put("extracted_lib_count", extractedLibs);
+            manifest.put("asset_count", extractedAssets);
+            manifest.put("archive_size", report.archiveSize);
+            manifest.put(GuestRunActivity.EXTRA_ABIS, abis);
+            manifest.put(GuestRunActivity.EXTRA_APK_PATH, apkFile.getAbsolutePath());
+            manifest.put("app_dir", appDir.getAbsolutePath());
+            manifest.put(GuestRunActivity.EXTRA_LIB_DIR, appLibDir.getAbsolutePath());
+            manifest.put("assets_dir", appAssetsDir.getAbsolutePath());
+            manifest.put(GuestRunActivity.EXTRA_DATA_DIR, appDataDir.getAbsolutePath());
+            manifest.put("installed_at", installedAt);
+            writeJsonFile(new File(appDir, "manifest.json"), manifest);
+        } catch (JSONException e) {
+            throw new IOException("App manifest JSON creation failed", e);
         }
     }
 
@@ -1456,43 +1290,35 @@ public class MainActivity extends Activity {
         }
         try {
             JSONObject manifest = new JSONObject();
-            try {
-                manifest.put("schema", "single-vm-app");
-                manifest.put("version", MANIFEST_VERSION);
-                manifest.put(GuestRunActivity.EXTRA_INSTALL_ID, installId);
-                manifest.put("display_name", this.prefs.getString(prefix + "display_name", installId));
-                manifest.put(GuestRunActivity.EXTRA_LABEL, this.prefs.getString(prefix + GuestRunActivity.EXTRA_LABEL, installId));
-                manifest.put(GuestRunActivity.EXTRA_PACKAGE, this.prefs.getString(prefix + GuestRunActivity.EXTRA_PACKAGE, ""));
-                manifest.put("version_name", this.prefs.getString(prefix + "version_name", ""));
-                manifest.put("version_code", this.prefs.getLong(prefix + "version_code", 0L));
-                manifest.put("first_activity", this.prefs.getString(prefix + "first_activity", ""));
-                manifest.put("activity_count", this.prefs.getInt(prefix + "activity_count", 0));
-                manifest.put("permission_count", this.prefs.getInt(prefix + "permission_count", 0));
-                manifest.put("dex_count", this.prefs.getInt(prefix + "dex_count", 0));
-                manifest.put("native_lib_count", this.prefs.getInt(prefix + "native_lib_count", 0));
-                manifest.put(GuestRunActivity.EXTRA_ARM32_LIB_COUNT, this.prefs.getInt(prefix + GuestRunActivity.EXTRA_ARM32_LIB_COUNT, 0));
-                manifest.put("arm64_lib_count", this.prefs.getInt(prefix + "arm64_lib_count", 0));
-                manifest.put("extracted_lib_count", this.prefs.getInt(prefix + "extracted_lib_count", 0));
-                manifest.put("asset_count", this.prefs.getInt(prefix + "asset_count", 0));
-                manifest.put("archive_size", this.prefs.getLong(prefix + "archive_size", 0L));
-                manifest.put(GuestRunActivity.EXTRA_ABIS, new JSONArray((Collection) splitCommaList(this.prefs.getString(prefix + GuestRunActivity.EXTRA_ABIS, ""))));
-                manifest.put(GuestRunActivity.EXTRA_APK_PATH, this.prefs.getString(prefix + GuestRunActivity.EXTRA_APK_PATH, ""));
-                try {
-                    manifest.put("app_dir", appDirPath);
-                    manifest.put(GuestRunActivity.EXTRA_LIB_DIR, this.prefs.getString(prefix + GuestRunActivity.EXTRA_LIB_DIR, ""));
-                    manifest.put("assets_dir", this.prefs.getString(prefix + "assets_dir", ""));
-                    manifest.put(GuestRunActivity.EXTRA_DATA_DIR, this.prefs.getString(prefix + GuestRunActivity.EXTRA_DATA_DIR, ""));
-                    manifest.put("installed_at", this.prefs.getString(prefix + "installed_at", ""));
-                    writeJsonFile(new File(appDirPath, "manifest.json"), manifest);
-                } catch (JSONException e) {
-                    e = e;
-                    throw new IOException("App manifest JSON creation failed", e);
-                }
-            } catch (JSONException e2) {
-                e = e2;
-            }
-        } catch (JSONException e3) {
-            e = e3;
+            manifest.put("schema", "single-vm-app");
+            manifest.put("version", MANIFEST_SCHEMA_VERSION);
+            manifest.put(GuestRunActivity.EXTRA_INSTALL_ID, installId);
+            manifest.put("display_name", this.prefs.getString(prefix + "display_name", installId));
+            manifest.put(GuestRunActivity.EXTRA_LABEL, this.prefs.getString(prefix + GuestRunActivity.EXTRA_LABEL, installId));
+            manifest.put(GuestRunActivity.EXTRA_PACKAGE, this.prefs.getString(prefix + GuestRunActivity.EXTRA_PACKAGE, ""));
+            manifest.put("version_name", this.prefs.getString(prefix + "version_name", ""));
+            manifest.put("version_code", this.prefs.getLong(prefix + "version_code", 0L));
+            manifest.put("first_activity", this.prefs.getString(prefix + "first_activity", ""));
+            manifest.put("activity_count", this.prefs.getInt(prefix + "activity_count", 0));
+            manifest.put("permission_count", this.prefs.getInt(prefix + "permission_count", 0));
+            manifest.put("dex_count", this.prefs.getInt(prefix + "dex_count", 0));
+            manifest.put("native_lib_count", this.prefs.getInt(prefix + "native_lib_count", 0));
+            manifest.put(GuestRunActivity.EXTRA_ARM32_LIB_COUNT, this.prefs.getInt(prefix + GuestRunActivity.EXTRA_ARM32_LIB_COUNT, 0));
+            manifest.put("arm64_lib_count", this.prefs.getInt(prefix + "arm64_lib_count", 0));
+            manifest.put("extracted_lib_count", this.prefs.getInt(prefix + "extracted_lib_count", 0));
+            manifest.put("asset_count", this.prefs.getInt(prefix + "asset_count", 0));
+            manifest.put("archive_size", this.prefs.getLong(prefix + "archive_size", 0L));
+            manifest.put(GuestRunActivity.EXTRA_ABIS,
+                    new JSONArray((Collection<?>) splitCommaList(this.prefs.getString(prefix + GuestRunActivity.EXTRA_ABIS, ""))));
+            manifest.put(GuestRunActivity.EXTRA_APK_PATH, this.prefs.getString(prefix + GuestRunActivity.EXTRA_APK_PATH, ""));
+            manifest.put("app_dir", appDirPath);
+            manifest.put(GuestRunActivity.EXTRA_LIB_DIR, this.prefs.getString(prefix + GuestRunActivity.EXTRA_LIB_DIR, ""));
+            manifest.put("assets_dir", this.prefs.getString(prefix + "assets_dir", ""));
+            manifest.put(GuestRunActivity.EXTRA_DATA_DIR, this.prefs.getString(prefix + GuestRunActivity.EXTRA_DATA_DIR, ""));
+            manifest.put("installed_at", this.prefs.getString(prefix + "installed_at", ""));
+            writeJsonFile(new File(appDirPath, "manifest.json"), manifest);
+        } catch (JSONException e) {
+            throw new IOException("App manifest JSON creation failed", e);
         }
     }
 
@@ -1503,7 +1329,7 @@ public class MainActivity extends Activity {
         }
         String[] parts = value.split(",");
         int length = parts.length;
-        for (int i = 0; i < length; i += MANIFEST_VERSION) {
+        for (int i = 0; i < length; i++) {
             String part = parts[i];
             String trimmed = part.trim();
             if (!trimmed.isEmpty()) {
@@ -1516,9 +1342,9 @@ public class MainActivity extends Activity {
     private Set<String> getInstalledPackages() {
         Set<String> stored = this.prefs.getStringSet(KEY_INSTALLED_PACKAGES, null);
         if (stored == null) {
-            return new LinkedHashSet();
+            return new LinkedHashSet<>();
         }
-        return new LinkedHashSet(stored);
+        return new LinkedHashSet<>(stored);
     }
 
     private String sanitizePackageName(String value) {
@@ -1526,7 +1352,7 @@ public class MainActivity extends Activity {
             return "";
         }
         StringBuilder out = new StringBuilder();
-        for (int i = 0; i < value.length(); i += MANIFEST_VERSION) {
+        for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
             if ((c >= 'a' && c <= 'z') || ((c >= 'A' && c <= 'Z') || ((c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))) {
                 out.append(c);
@@ -1548,10 +1374,8 @@ public class MainActivity extends Activity {
         return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.KOREA).format(new Date());
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
-    /* JADX INFO: renamed from: showToast, reason: merged with bridge method [inline-methods] */
-    public void m2x16efb73e(String message) {
-        Toast.makeText(this, message, MANIFEST_VERSION).show();
+    private void showToast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private void showError(String title, String message) {
