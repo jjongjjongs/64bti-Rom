@@ -4,6 +4,10 @@
 판단을 정리한 것입니다. 코드 정리나 빌드 설정과 달리 **아직 결정되지 않은 것**을
 다룹니다.
 
+**이 저장소의 범위**: APK 형태로 배포된 32비트 전용 안드로이드 게임을, 32비트
+가상롬 안에서 실행시키는 것. (LGT 피처폰 WIPI 게임 구동은 별개 프로젝트이며 이
+저장소와 무관합니다.)
+
 ## 지금 게임이 실행되지 않는 이유
 
 빌드는 됩니다. 게스트를 띄우는 것도 코드상으로는 시도합니다. 그런데 게임이
@@ -39,7 +43,50 @@ virtio-serial 파이프 8개(`org.singlevm.pipe.0~7`)를 깔아두고 호스트�
 
 입력(터치 → 게스트)도 마찬가지로 어디에도 구현되어 있지 않습니다.
 
-### 3. 성능
+### 3. 게스트 하드웨어 계약이 모순이다 (ranchu vs virt)
+
+번들된 `libqemu-system-aarch64.so`(QEMU 11.0.2)를 조사한 결과, **업스트림 QEMU
+빌드**입니다. 머신 타입은 `virt` 하나뿐이고 `ranchu`가 없습니다.
+`goldfish_rtc` / `goldfish_tty` / `goldfish_pic` 심볼이 보이지만 이건 업스트림이
+RISC-V · MIPS 보드용으로 가지고 있는 것이고, 안드로이드 에뮬레이터가 요구하는
+**`goldfish_fb`(프레임버퍼), `goldfish_pipe`(호스트 통신·GPU), `goldfish_events`(입력)는
+존재하지 않습니다.**
+
+그런데 `buildModernQemuCommand()`가 넘기는 커널 cmdline은
+`androidboot.hardware=ranchu` 입니다. 실제 제공 하드웨어는 virtio 계열
+(`virtio-gpu-pci`, `virtio-blk-device`, `virtserialport`)인데 게스트에게는
+goldfish 하드웨어라고 선언하는 셈입니다.
+
+**결과: 어떤 이미지를 넣어도 맞지 않습니다.**
+
+- 표준 에뮬레이터(ranchu) 시스템 이미지 → init은 올라와도 HAL이 goldfish 장치를
+  찾지 못해 부팅이 완료되지 않습니다.
+- virtio 대상으로 만든 이미지 → `androidboot.hardware=ranchu`가 잘못된 값입니다.
+
+#### 이게 왜 이렇게 됐는가 (툴체인 증거)
+
+앞서 확인한 두 툴체인 세대가 이 모순을 설명합니다.
+
+| 라이브러리 | NDK | 설계 방향 |
+|---|---|---|
+| `libemugl_host_android.so`, `libemugl_probe.so`, `libsinglevm_*` | r26 (clang 17.0.2) | AOSP 에뮬레이터 emugl = **ranchu/goldfish_pipe 전제** |
+| `libqemu-system-aarch64.so`, `libslirp.so`, `libpodroid-launcher.so` | r27 (clang 18.0.3) | **업스트림 QEMU = virt 전용** |
+
+즉 원래 설계는 **ranchu + goldfish_pipe + emugl**(구글 에뮬레이터 스택)이었는데,
+나중에 QEMU만 업스트림 빌드로 교체되면서 ranchu 계약이 깨진 것으로 보입니다.
+emugl 라이브러리들이 저장소에 남아 있는 것이 원래 방향의 증거입니다.
+
+#### 선택지
+
+1. **ranchu 가능한 QEMU로 되돌린다** — 구글의 `qemu-android` 포크를 arm64 안드로이드용으로
+   빌드해서 `libqemu-system-aarch64.so`를 교체. 그러면 기존 cmdline·emugl·표준 Android 7
+   ARM32 에뮬레이터 시스템 이미지가 전부 아귀가 맞습니다. **원 설계로의 복귀**이고,
+   기성 이미지를 쓸 수 있다는 게 가장 큰 장점입니다.
+2. **virtio 대상 게스트를 새로 만든다** — 현재 하드웨어 구성에 맞춰 AOSP를 빌드.
+   `androidboot.hardware`도 그에 맞게 바꿔야 합니다. 기성 이미지가 없어 부담이 큽니다.
+3. **전면 에뮬레이션을 포기한다** — 위 (A) 시나리오면 앱 레벨 가상화가 훨씬 빠릅니다.
+
+### 4. 성능
 
 `-accel tcg,thread=multi` — TCG는 순수 소프트웨어 번역입니다. 휴대폰에서 Android 7
 전체를 TCG로 돌리면 부팅에만 수 분이 걸리고, 3D 게임은 현실적으로 플레이 가능한
