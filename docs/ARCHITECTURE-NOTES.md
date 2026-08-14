@@ -11,7 +11,7 @@
 ## 지금 게임이 실행되지 않는 이유
 
 빌드는 됩니다. 게스트를 띄우는 것도 코드상으로는 시도합니다. 그런데 게임이
-실행될 수 없는 **구조적** 이유가 세 가지 있습니다.
+실행될 수 없는 **구조적** 이유가 있습니다.
 
 ### 1. 게임 APK를 게스트로 넘기는 통로가 없다
 
@@ -43,48 +43,57 @@ virtio-serial 파이프 8개(`org.singlevm.pipe.0~7`)를 깔아두고 호스트�
 
 입력(터치 → 게스트)도 마찬가지로 어디에도 구현되어 있지 않습니다.
 
-### 3. 게스트 하드웨어 계약이 모순이다 (ranchu vs virt)
+### 3. 게스트 하드웨어: 모순이 아니라 의도된 설계다 (정정)
 
-번들된 `libqemu-system-aarch64.so`(QEMU 11.0.2)를 조사한 결과, **업스트림 QEMU
-빌드**입니다. 머신 타입은 `virt` 하나뿐이고 `ranchu`가 없습니다.
-`goldfish_rtc` / `goldfish_tty` / `goldfish_pic` 심볼이 보이지만 이건 업스트림이
-RISC-V · MIPS 보드용으로 가지고 있는 것이고, 안드로이드 에뮬레이터가 요구하는
-**`goldfish_fb`(프레임버퍼), `goldfish_pipe`(호스트 통신·GPU), `goldfish_events`(입력)는
-존재하지 않습니다.**
+> 이 절의 이전 판은 `androidboot.hardware=ranchu`와 virtio 하드웨어가 모순이라고
+> 기술했고, 해결책으로 ranchu 지원 QEMU 재빌드를 권했습니다. **그 판단은
+> 틀렸습니다.** 아래가 정정된 내용입니다.
 
-그런데 `buildModernQemuCommand()`가 넘기는 커널 cmdline은
-`androidboot.hardware=ranchu` 입니다. 실제 제공 하드웨어는 virtio 계열
-(`virtio-gpu-pci`, `virtio-blk-device`, `virtserialport`)인데 게스트에게는
-goldfish 하드웨어라고 선언하는 셈입니다.
+번들 QEMU가 업스트림 빌드(`virt`만 있고 `ranchu`·`goldfish_fb`·`goldfish_pipe` 없음)인
+것은 사실입니다. 그런데 emugl 라이브러리를 조사하면 이유가 드러납니다.
 
-**결과: 어떤 이미지를 넣어도 맞지 않습니다.**
+```
+libemugl_probe.so         "pipe:qemud", "qemu.gles"
+libemugl_host_android.so  "pipe:opengles"
+                          emugl::RendererImpl::createRenderChannel
+                          emugl::RenderChannelImpl::readFromGuest / writeToGuest
+```
 
-- 표준 에뮬레이터(ranchu) 시스템 이미지 → init은 올라와도 HAL이 goldfish 장치를
-  찾지 못해 부팅이 완료되지 않습니다.
-- virtio 대상으로 만든 이미지 → `androidboot.hardware=ranchu`가 잘못된 값입니다.
+`pipe:opengles` / `pipe:qemud`는 **goldfish pipe의 서비스 핸드셰이크 문자열**입니다.
+즉 `libemugl_probe.so`는 goldfish pipe **프로토콜을 그대로 구현하되 전송 계층만
+유닉스 소켓(virtio-serial)으로 교체**한 브리지입니다. `nativeStartEmuglBridge()`가
+goldfish 장치가 아니라 `transport/pipeN.sock` 경로를 받는 것도 이 때문입니다.
 
-#### 이게 왜 이렇게 됐는가 (툴체인 증거)
+따라서 전체 그림은 이렇게 맞아떨어집니다.
 
-앞서 확인한 두 툴체인 세대가 이 모순을 설명합니다.
+1. `androidboot.hardware=ranchu` → 게스트가 **표준 ranchu HAL**(`gralloc.ranchu`,
+   `libEGL_emulation`)을 로드한다
+2. 그 HAL들이 `/dev/qemu_pipe`를 열고 `pipe:opengles`를 쓴다
+3. **`/init.wrapper`가 `/dev/qemu_pipe`를 `/dev/vport0p0~7`로 돌려준다** — 이것이
+   init.wrapper의 존재 이유로 보인다
+4. virtio-serial이 호스트의 유닉스 소켓으로 전달한다
+5. `libemugl_probe.so`가 핸드셰이크를 읽고 `emugl::Renderer`에 연결한다
 
-| 라이브러리 | NDK | 설계 방향 |
-|---|---|---|
-| `libemugl_host_android.so`, `libemugl_probe.so`, `libsinglevm_*` | r26 (clang 17.0.2) | AOSP 에뮬레이터 emugl = **ranchu/goldfish_pipe 전제** |
-| `libqemu-system-aarch64.so`, `libslirp.so`, `libpodroid-launcher.so` | r27 (clang 18.0.3) | **업스트림 QEMU = virt 전용** |
+goldfish_pipe **하드웨어 없이** 표준 ranchu 그래픽 HAL을 재활용하려는 설계이며,
+그래서 업스트림 QEMU로 충분합니다. `androidboot.hardware=ranchu`는 잘못 남은 값이
+아니라 **의도적으로 맞는 값**입니다.
 
-즉 원래 설계는 **ranchu + goldfish_pipe + emugl**(구글 에뮬레이터 스택)이었는데,
-나중에 QEMU만 업스트림 빌드로 교체되면서 ranchu 계약이 깨진 것으로 보입니다.
-emugl 라이브러리들이 저장소에 남아 있는 것이 원래 방향의 증거입니다.
+#### 그래서 QEMU는 손댈 필요가 없다
 
-#### 선택지
+- ranchu 지원 QEMU(구글 `external/qemu`, QEMU 2.8 기반)를 android-arm64로 포팅할
+  필요가 **없습니다.** 그건 데스크톱 호스트용 빌드 시스템이라 부담이 크고, TCG도
+  11.x보다 느립니다.
+- 업스트림 QEMU에 goldfish 장치를 이식할 필요도 **없습니다.**
 
-1. **ranchu 가능한 QEMU로 되돌린다** — 구글의 `qemu-android` 포크를 arm64 안드로이드용으로
-   빌드해서 `libqemu-system-aarch64.so`를 교체. 그러면 기존 cmdline·emugl·표준 Android 7
-   ARM32 에뮬레이터 시스템 이미지가 전부 아귀가 맞습니다. **원 설계로의 복귀**이고,
-   기성 이미지를 쓸 수 있다는 게 가장 큰 장점입니다.
-2. **virtio 대상 게스트를 새로 만든다** — 현재 하드웨어 구성에 맞춰 AOSP를 빌드.
-   `androidboot.hardware`도 그에 맞게 바꿔야 합니다. 기성 이미지가 없어 부담이 큽니다.
-3. **전면 에뮬레이션을 포기한다** — 위 (A) 시나리오면 앱 레벨 가상화가 훨씬 빠릅니다.
+#### 진짜로 없는 것
+
+남은 공백은 **게스트 이미지 단 하나**입니다. 구체적으로:
+
+- `/init.wrapper`를 담은 램디스크 — `/dev/qemu_pipe` → `/dev/vport0p*` 리다이렉션
+- 그 커널에 virtio-serial(`CONFIG_VIRTIO_CONSOLE`), virtio-blk, virtio-gpu 지원
+- ranchu HAL이 들어있는 Android 7 ARM32 system.img
+
+즉 호스트 쪽은 대체로 서 있고, **게스트 쪽을 만들어야 합니다.**
 
 ### 4. 성능
 
