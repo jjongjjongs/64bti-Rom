@@ -28,7 +28,8 @@ else
     exit 1
 fi
 
-"$CC" -static -O2 -Wall -Wextra -o "$OUT" "$SRC_DIR/init_wrapper.c"
+# 램디스크는 통째로 RAM 에 적재되므로 디버그 정보를 남기지 않는다.
+"$CC" -static -O2 -Wall -Wextra -s -o "$OUT" "$SRC_DIR/init_wrapper.c"
 
 echo "==> 생성: $OUT"
 file "$OUT" || true

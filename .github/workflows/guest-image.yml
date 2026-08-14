@@ -133,18 +133,15 @@ jobs:
           if [ -f "$SYSIMG/userdata.img" ]; then cp "$SYSIMG/userdata.img" "$WORK/userdata.img"; fi
           truncate -s "$USERDATA_SIZE" "$WORK/userdata.img"
 
-          # --- 임포터 규격대로 패키징 (경로 없이 basename 만) ---
-          cd "$WORK"
-          rm -rf rd
-          zip -0 -j "$GITHUB_WORKSPACE/android7-guest.zip" kernel ramdisk.img system.img userdata.img
-          cd "$GITHUB_WORKSPACE"
+          # 여기서 zip 으로 묶지 않는다. upload-artifact 가 어차피 zip 으로 감싸므로,
+          # 미리 묶으면 zip 안에 zip 이 들어가 임포터가 kernel 을 찾지 못한다.
+          # 개별 파일을 올려서 아티팩트 zip 자체가 곧 임포트 가능한 ZIP 이 되게 한다.
+          rm -rf "$WORK/rd"
 
           {
             echo "## 결과"
             echo '```'
             ls -la "$WORK"
-            echo
-            echo "패키지: $(du -h android7-guest.zip | cut -f1)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -152,9 +149,15 @@ jobs:
         if: always()
         run: df -h /
 
+      # 받은 아티팩트 zip 을 그대로 앱의 "Android 7 구성 가져오기"에 넣으면 된다.
+      # 임포터는 ZIP 안에서 경로를 무시하고 basename 으로 찾으므로 디렉터리 접두사는 무해하다.
       - uses: actions/upload-artifact@v4
         with:
           name: android7-guest
-          path: android7-guest.zip
+          path: |
+            guest-out/kernel
+            guest-out/ramdisk.img
+            guest-out/system.img
+            guest-out/userdata.img
           if-no-files-found: error
           compression-level: 6
