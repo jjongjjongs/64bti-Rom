@@ -2,6 +2,8 @@ package com.example.singlevm;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -39,6 +41,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -65,6 +68,10 @@ public class MainActivity extends Activity {
     private static final int IMAGE_COPY_BUFFER_BYTES = 1024 * 1024;
     /** Headroom demanded on top of the raw entry sizes before unpacking a guest image bundle. */
     private static final long IMAGE_EXTRACT_HEADROOM_BYTES = 256L * 1024 * 1024;
+    /** QEMU 부팅 로그는 수 MB까지 커진다. 다이얼로그와 클립보드가 감당할 만큼만 읽는다. */
+    private static final int LOG_VIEW_TAIL_BYTES = 128 * 1024;
+    /** Intent extra는 Binder 트랜잭션(약 1MB)을 타므로 여유 있게 잘라 보낸다. */
+    private static final int LOG_SHARE_MAX_CHARS = 200 * 1024;
     private static final boolean NATIVE_RUNTIME_LOADED;
     private static final String PREFS = "single_vm_state";
     private static final int REQUEST_IMPORT_ANDROID7_IMAGE = 7002;
@@ -225,6 +232,8 @@ public class MainActivity extends Activity {
                 v -> showRuntimeProbe()));
         this.commandGrid.addView(makeCommandTile("설정", "⚙", Color.rgb(117, 133, 140),
                 v -> showVmSettings()));
+        this.commandGrid.addView(makeCommandTile("로그", "▤", Color.rgb(120, 80, 150),
+                v -> showLogs()));
         this.appGrid.removeAllViews();
         Set<String> installed = getInstalledPackages();
         for (String installId : installed) {
@@ -450,6 +459,99 @@ public class MainActivity extends Activity {
             return;
         }
         clearDirectory(target);
+    }
+
+    /**
+     * Log viewer. Exists because the useful diagnostics live in app-private storage, which is
+     * unreachable without adb or root — and adb is not an option for someone working phone-only.
+     * Reading the tail rather than the whole file keeps a multi-megabyte QEMU boot log from
+     * blowing up the dialog or the clipboard.
+     */
+    private void showLogs() {
+        File logDir = new File(this.vmRoot, "logs");
+        File[] files = logDir.listFiles();
+        if (files == null || files.length == 0) {
+            new AlertDialog.Builder(this)
+                    .setTitle("로그")
+                    .setMessage("아직 로그가 없습니다.\n\n" + logDir.getAbsolutePath()
+                            + "\n\n게임을 한 번 실행하면 QEMU 부팅 로그가 여기에 쌓입니다.")
+                    .setPositiveButton("확인", null)
+                    .show();
+            return;
+        }
+        java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        String[] labels = new String[files.length];
+        for (int i = 0; i < files.length; i++) {
+            labels[i] = files[i].getName() + "  (" + humanSize(files[i].length()) + ")";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("로그 — 최근 수정 순")
+                .setItems(labels, (dialog, which) -> showLogFile(files[which]))
+                .setNegativeButton("닫기", null)
+                .show();
+    }
+
+    private void showLogFile(final File file) {
+        final String tail = readTail(file, LOG_VIEW_TAIL_BYTES);
+        String header = file.getName() + "  (" + humanSize(file.length()) + ")";
+        if (file.length() > LOG_VIEW_TAIL_BYTES) {
+            header += "\n※ 마지막 " + humanSize(LOG_VIEW_TAIL_BYTES) + "만 표시";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(header)
+                .setMessage(tail.isEmpty() ? "(비어 있음)" : tail)
+                .setPositiveButton("복사", (dialog, which) -> copyToClipboard(file.getName(), tail))
+                .setNeutralButton("공유", (dialog, which) -> shareText(file.getName(), tail))
+                .setNegativeButton("닫기", null)
+                .show();
+    }
+
+    /** Reads at most {@code maxBytes} from the end of the file, trimming the first partial line. */
+    private String readTail(File file, int maxBytes) {
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            long length = raf.length();
+            long from = Math.max(0L, length - maxBytes);
+            raf.seek(from);
+            byte[] buffer = new byte[(int) Math.min(length - from, maxBytes)];
+            raf.readFully(buffer);
+            String text = new String(buffer, StandardCharsets.UTF_8);
+            if (from > 0) {
+                int newline = text.indexOf('\n');
+                if (newline >= 0 && newline + 1 < text.length()) {
+                    text = text.substring(newline + 1);
+                }
+            }
+            return text;
+        } catch (IOException e) {
+            return "로그를 읽을 수 없습니다: " + e.getMessage();
+        }
+    }
+
+    private void copyToClipboard(String label, String text) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            showToast("클립보드를 사용할 수 없습니다.");
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
+        showToast("복사했습니다 (" + humanSize(text.length()) + ")");
+    }
+
+    /**
+     * Shares the log as plain text rather than as a file URI, which would need a ContentProvider
+     * and an androidx dependency this project otherwise does not have. Intent extras cross a
+     * Binder transaction with a hard size ceiling, so the payload is capped well below it.
+     */
+    private void shareText(String label, String text) {
+        String payload = text;
+        if (payload.length() > LOG_SHARE_MAX_CHARS) {
+            payload = payload.substring(payload.length() - LOG_SHARE_MAX_CHARS);
+        }
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_SUBJECT, "singlevm " + label);
+        intent.putExtra(Intent.EXTRA_TEXT, payload);
+        startActivity(Intent.createChooser(intent, "로그 공유"));
     }
 
     private void showVmSettings() {
