@@ -76,6 +76,9 @@ public final class Android7GuestEngineAdapter implements EngineAdapter {
                 missing.add(image.getName());
             }
         }
+        File cache = new File(imageDir, "cache.img");
+        details.append("- cache.img: ").append((!cache.isFile() || cache.length() <= 0)
+                ? "없음 (fstab 이 vdb=/cache 를 기대하므로 권장)" : humanSize(cache.length())).append('\n');
         File userdata = new File(imageDir, "userdata.img");
         details.append("- userdata.img: ").append((!userdata.isFile() || userdata.length() <= 0) ? "없음 (첫 부팅 시 생성 예정)" : humanSize(userdata.length())).append('\n');
         File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir);

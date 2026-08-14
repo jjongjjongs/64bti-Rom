@@ -70,7 +70,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install build tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq cpio zip android-sdk-libsparse-utils qemu-utils
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cpio zip android-sdk-libsparse-utils qemu-utils e2fsprogs
 
       - name: Build init.wrapper (static ARM32, NDK)
         run: |
@@ -181,9 +181,19 @@ jobs:
           grep -qx "init"         /tmp/rd.list || { echo "::error::원래 init 이 사라짐"; exit 1; }
           echo "램디스크 재패킹 검증 통과"
 
-          # --- userdata ---
+          # --- userdata / cache ---
+          # 순서가 곧 vda/vdb/vdc 이고, Android 7 fstab.ranchu 는
+          #   vda=/system, vdb=/cache, vdc=/data 를 기대한다(실측: 없으면 fs_mgr 이
+          #   "No such file or directory" 로 실패하고 healthd 가 죽으며 recovery 로 재부팅).
+          # 그래서 cache.img 를 반드시 만들어 넣는다.
+          mkfs.ext4 -q -F -L cache -b 4096 "$WORK/cache.img" 256M
+
           if [ -f "$SYSIMG/userdata.img" ]; then cp "$SYSIMG/userdata.img" "$WORK/userdata.img"; fi
           truncate -s "$USERDATA_SIZE" "$WORK/userdata.img"
+          # truncate 는 파일만 늘린다. 슈퍼블록이 예전 크기를 가리키면 게스트가 늘어난
+          # 공간을 못 쓰므로 파일시스템도 같이 키운다.
+          e2fsck -fy "$WORK/userdata.img" >/dev/null 2>&1 || true
+          resize2fs "$WORK/userdata.img" >/dev/null 2>&1 || echo "resize2fs 실패 (무시)"
 
           # 여기서 zip 으로 묶지 않는다. upload-artifact 가 어차피 zip 으로 감싸므로,
           # 미리 묶으면 zip 안에 zip 이 들어가 임포터가 kernel 을 찾지 못한다.
@@ -221,6 +231,10 @@ jobs:
                  -initrd "$WORK/ramdisk.img"
                  -drive "if=none,id=system,format=raw,readonly=on,file=$WORK/system.img"
                  -device virtio-blk-device,drive=system
+                 -drive "if=none,id=cache,format=raw,file=$WORK/cache.img"
+                 -device virtio-blk-device,drive=cache
+                 -drive "if=none,id=userdata,format=raw,file=$WORK/userdata.img"
+                 -device virtio-blk-device,drive=userdata
                  -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
 
           boot_with() {   # $1 = 라벨, $2 = 커널 경로
@@ -295,6 +309,7 @@ jobs:
             guest-out/ramdisk.img
             guest-out/system.img
             guest-out/userdata.img
+            guest-out/cache.img
           if-no-files-found: error
           compression-level: 6
 

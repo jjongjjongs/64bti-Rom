@@ -687,11 +687,12 @@ public class MainActivity extends Activity {
                 ZipEntry ramdisk = findZipEntry(zip, "ramdisk.img");
                 ZipEntry system = findZipEntry(zip, "system.img");
                 ZipEntry userdata = findZipEntry(zip, "userdata.img");
+                ZipEntry cache = findZipEntry(zip, "cache.img");
                 if (kernel == null || ramdisk == null || system == null) {
                     throw new IOException("ZIP에 kernel-ranchu/kernel-qemu, ramdisk.img, system.img가 필요합니다.");
                 }
                 long required = positiveSize(kernel) + positiveSize(ramdisk) + positiveSize(system)
-                        + positiveSize(userdata) + IMAGE_EXTRACT_HEADROOM_BYTES;
+                        + positiveSize(userdata) + positiveSize(cache) + IMAGE_EXTRACT_HEADROOM_BYTES;
                 if (required > 0 && this.android7ImageDir.getUsableSpace() < required) {
                     throw new IOException("압축 해제 공간이 부족합니다. 최소 " + humanSize(required) + "가 필요합니다.");
                 }
@@ -700,6 +701,10 @@ public class MainActivity extends Activity {
                 extractZipEntry(zip, system, new File(this.android7ImageDir, "system.img"));
                 if (userdata != null) {
                     extractZipEntry(zip, userdata, new File(this.android7ImageDir, "userdata.img"));
+                }
+                // cache.img 가 없으면 userdata 가 vdb 로 잡혀 fstab 매핑이 어긋난다.
+                if (cache != null) {
+                    extractZipEntry(zip, cache, new File(this.android7ImageDir, "cache.img"));
                 }
                 zip.close();
                 if (bundle.exists() && !bundle.delete()) {
@@ -806,6 +811,9 @@ public class MainActivity extends Activity {
         }
         if (lower.equals("system.img")) {
             return "system.img";
+        }
+        if (lower.equals("cache.img")) {
+            return "cache.img";
         }
         if (!lower.equals("userdata.img")) {
             return null;

@@ -448,24 +448,39 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         command.add(selectedKernel.getAbsolutePath());
         command.add("-initrd");
         command.add(selectedRamdisk.getAbsolutePath());
+        // 순서가 곧 장치 이름이다. Android 7 의 fstab.ranchu 는 고정된 매핑을 기대한다:
+        //   vda = /system,  vdb = /cache,  vdc = /data(userdata)
+        // virtio-blk 는 붙인 순서대로 vda, vdb, vdc ... 가 되므로 반드시 이 순서여야 한다.
+        // 이전에는 userdata 를 먼저 붙여서 /system 을 userdata 에서 마운트하려 했고,
+        // fs_mgr 이 "No such file or directory" 로 실패했다(실측).
+        //
+        // 중간 이미지가 없으면 뒤 장치가 앞으로 당겨져 매핑이 어긋나므로, 없더라도
+        // 자리를 비우지 않고 파일이 있는 경우에만 뒤에 이어 붙인다. cache 가 없는데
+        // userdata 가 있으면 userdata 가 vdb 가 되어버리는 문제가 남으므로, 그때는
+        // 로그로 알린다.
+        command.add("-drive");
+        command.add("if=none,id=system,format=raw,readonly=on,file="
+                + new File(imageRoot, "system.img").getAbsolutePath());
+        command.add("-device");
+        command.add("virtio-blk-device,drive=system");
+
+        File cache = new File(imageRoot, "cache.img");
         File userdata = new File(imageRoot, "userdata.img");
+        if (cache.isFile()) {
+            command.add("-drive");
+            command.add("if=none,id=cache,format=raw,file=" + cache.getAbsolutePath());
+            command.add("-device");
+            command.add("virtio-blk-device,drive=cache");
+        } else if (userdata.isFile()) {
+            appendRuntimeLog("\n\n⚠ cache.img 가 없어 userdata 가 vdb 로 잡힙니다."
+                    + "\n  Android 7 fstab 은 vdb=/cache, vdc=/data 를 기대하므로 /data 마운트가 실패합니다.");
+        }
         if (userdata.isFile()) {
             command.add("-drive");
             command.add("if=none,id=userdata,format=raw,file=" + userdata.getAbsolutePath());
             command.add("-device");
             command.add("virtio-blk-device,drive=userdata");
         }
-        File cache = new File(imageRoot, "cache.img");
-        if (cache.isFile()) {
-            command.add("-drive");
-            command.add("if=none,id=cache,format=raw,file=" + cache.getAbsolutePath());
-            command.add("-device");
-            command.add("virtio-blk-device,drive=cache");
-        }
-        command.add("-drive");
-        command.add("if=none,id=system,format=raw,readonly=on,file=" + new File(imageRoot, "system.img").getAbsolutePath());
-        command.add("-device");
-        command.add("virtio-blk-device,drive=system");
         command.add("-append");
         command.add(resolveKernelCmdline());
         return command;
