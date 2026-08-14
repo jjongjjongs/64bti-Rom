@@ -181,6 +181,18 @@ jobs:
             } >> init.rc
             echo "seriallogcat 서비스 추가됨"
           fi
+          # fstab.ranchu 에서 /data 만 fs_mgr 플래그에 check 를 달고 있다(/system, /cache 는
+          # wait 뿐). 마운트되는 것과 안 되는 것의 차이가 정확히 이것 하나다.
+          #
+          # check 는 fs_mgr 이 e2fsck 를 돌리게 한다. 그런데 최근 SDK 시스템 이미지는
+          # 라이선스 문제로 e2fsck 를 빼고 배포하며, 우리는 어차피 매번 mkfs.ext4 로
+          # 갓 만든 깨끗한 파일시스템을 넘긴다. 검사할 것이 없다.
+          if [ -f fstab.ranchu ]; then
+            echo "fstab.ranchu (원본):"; grep -n "/data" fstab.ranchu || true
+            sed -i 's/wait,check/wait/g' fstab.ranchu
+            echo "fstab.ranchu (수정):"; grep -n "/data" fstab.ranchu || true
+          fi
+
           find . | cpio -o -H newc | gzip > "$WORK/ramdisk.img"
           cd "$GITHUB_WORKSPACE"
 
