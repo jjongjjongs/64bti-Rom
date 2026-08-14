@@ -143,6 +143,13 @@ jobs:
             *)                        cp "$SYS" "$WORK/system.img" ;;
           esac
 
+          # 게스트의 init.wrapper 가 ext4 라벨로 장치를 찾아 fstab 을 고쳐 쓴다.
+          # cache/userdata 는 mkfs 할 때 라벨을 주지만 SDK 의 system.img 라벨은
+          # 보장되지 않으므로 여기서 정한다.
+          echo "system.img 라벨(원본): '$(e2label "$WORK/system.img" 2>&1 || true)'"
+          e2label "$WORK/system.img" system
+          echo "system.img 라벨(설정): '$(e2label "$WORK/system.img")'"
+
           # --- ramdisk: init.wrapper 를 넣어 재패킹 ---
           RD="$SYSIMG/ramdisk.img"
           [ -f "$RD" ] || { echo "::error::ramdisk.img 없음"; exit 1; }
@@ -235,7 +242,8 @@ jobs:
             grep -n -E "mount_all|^on fs|^on post-fs|voldmanaged|encryptable" *.rc 2>/dev/null || echo "(없음)"
             echo "=== 이미지 ==="
             for img in system cache userdata; do
-              printf '%-12s %s\n' "$img.img" "$(file -b "$WORK/$img.img" | cut -c1-70)"
+              printf '%-12s label=%-10s %s\n' "$img.img" "$(e2label "$WORK/$img.img" 2>/dev/null)" \
+                "$(file -b "$WORK/$img.img" | cut -c1-46)"
             done
           } | tee /tmp/boot/facts.txt
 

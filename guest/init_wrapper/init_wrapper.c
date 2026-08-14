@@ -339,6 +339,147 @@ static void watchdog_main(void) {
     _exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// fstab 장치 이름 교정
+//
+// fstab.ranchu 는 vda=/system, vdb=/cache, vdc=/data 를 고정으로 기대한다. 그런데
+// virtio-mmio 는 -device 를 적은 순서대로 vda, vdb, vdc 가 된다고 보장하지 않는다.
+// 실측: 커맨드라인에 system, cache, userdata 순으로 적었는데 게스트는 vda=userdata(2G),
+// vdb=cache(256M), vdc=system(1.75G) 으로 봤다. 그래서 /system 은 빈 userdata 를 물고
+// (빈 ext4 도 ro 마운트는 성공한다) /data 는 읽기 전용인 system.img 에 rw 마운트를
+//시도하다 EACCES 로 죽었다.
+//
+// 호스트 QEMU 버전에 따라 순서가 또 달라질 수 있으므로 순서를 맞추는 대신, 각 장치의
+// ext4 슈퍼블록 라벨을 읽어 fstab 을 실제 장치 이름으로 고쳐 쓴다. 이 시점의 rootfs 는
+// 아직 쓰기 가능하다(안드로이드 init 이 on early-init 에서 ro 로 리마운트한다).
+// ---------------------------------------------------------------------------
+
+#define EXT_SB_OFFSET 1024
+#define EXT_SB_MAGIC_OFF 0x38
+#define EXT_SB_LABEL_OFF 0x78
+#define EXT_LABEL_MAX 16
+
+static int read_ext_label(const char *devpath, char *label, size_t len) {
+    int fd = open(devpath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    unsigned char sb[256];
+    ssize_t n = pread(fd, sb, sizeof(sb), EXT_SB_OFFSET);
+    close(fd);
+    if (n < (ssize_t)sizeof(sb)) return -1;
+    // s_magic 은 리틀엔디안 0xEF53
+    if (sb[EXT_SB_MAGIC_OFF] != 0x53 || sb[EXT_SB_MAGIC_OFF + 1] != 0xEF) return -1;
+    size_t cap = len - 1 < EXT_LABEL_MAX ? len - 1 : EXT_LABEL_MAX;
+    memcpy(label, sb + EXT_SB_LABEL_OFF, cap);
+    label[cap] = '\0';
+    return 0;
+}
+
+static int find_dev_by_label(const char *label, char *out, size_t len) {
+    DIR *d = opendir(SCRATCH_DEV);
+    if (!d) return -1;
+    int found = -1;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        // vda..vdz 만. vda1 같은 파티션은 우리 구성에 없다.
+        if (strncmp(e->d_name, "vd", 2) != 0 || strlen(e->d_name) != 3) continue;
+        char path[256], lbl[EXT_LABEL_MAX + 1];
+        snprintf(path, sizeof(path), "%s/%s", SCRATCH_DEV, e->d_name);
+        if (read_ext_label(path, lbl, sizeof(lbl)) != 0) continue;
+        put_fmt("disk %s label=\"%s\"", e->d_name, lbl);
+        if (found != 0 && strcmp(lbl, label) == 0) {
+            snprintf(out, len, "/dev/block/%s", e->d_name);
+            found = 0;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+static int count_disks(void) {
+    DIR *d = opendir(SCRATCH_DEV);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "vd", 2) == 0 && strlen(e->d_name) == 3) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+// virtio-blk 프로브가 virtio-console 보다 늦을 수 있다. 디스크가 하나도 안 보이는
+// 상태에서 라벨을 읽으면 아무것도 못 찾고 fstab 을 그대로 두게 된다.
+static int wait_for_disks(int timeout_ms) {
+    int waited = 0;
+    while (waited <= timeout_ms) {
+        if (count_disks() > 0) return waited;
+        sleep_ms(VPORT_POLL_MS);
+        waited += VPORT_POLL_MS;
+    }
+    return -1;
+}
+
+static void fixup_fstab(const char *path) {
+    static const struct { const char *mnt; const char *label; } wanted[] = {
+        {"/system", "system"}, {"/cache", "cache"}, {"/data", "data"},
+    };
+    char buf[16384];
+    int n = read_small(path, buf, sizeof(buf));
+    if (n <= 0) {
+        put_fmt("fstab: cannot read %s", path);
+        return;
+    }
+
+    char out[16384];
+    size_t used = 0;
+    int changed = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char dev[160], mnt[160], repl[160];
+        const char *use = NULL;
+        if (sscanf(line, "%159s %159s", dev, mnt) == 2 &&
+            strncmp(dev, "/dev/block/vd", 13) == 0) {
+            for (size_t i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
+                if (strcmp(mnt, wanted[i].mnt) != 0) continue;
+                if (find_dev_by_label(wanted[i].label, repl, sizeof(repl)) == 0) {
+                    use = repl;
+                } else {
+                    put_fmt("fstab: no disk labelled \"%s\" for %s, leaving %s",
+                            wanted[i].label, mnt, dev);
+                }
+                break;
+            }
+        }
+        int wrote;
+        if (use && strcmp(use, dev) != 0) {
+            put_fmt("fstab: %s %s -> %s", mnt, dev, use);
+            changed = 1;
+            // 나머지 열(마운트 옵션, fs_mgr 플래그)은 그대로 둔다.
+            wrote = snprintf(out + used, sizeof(out) - used, "%s%s\n", use, line + strlen(dev));
+        } else {
+            wrote = snprintf(out + used, sizeof(out) - used, "%s\n", line);
+        }
+        if (wrote < 0 || (size_t)wrote >= sizeof(out) - used) {
+            put_line("fstab: rewrite buffer full, leaving the file alone", NULL);
+            return;
+        }
+        used += (size_t)wrote;
+    }
+
+    if (!changed) {
+        put_line("fstab: device names already correct", NULL);
+        return;
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        put_fmt("fstab: cannot write %s: %s", path, strerror(errno));
+        return;
+    }
+    ssize_t w = write(fd, out, used);
+    close(fd);
+    put_fmt("fstab: rewrote %s (%d bytes)", path, (int)w);
+}
+
 // devtmpfs 를 /dev 가 아니라 스크래치 경로에 붙인다. 안드로이드 first-stage init 은
 // /dev 에 tmpfs 를 새로 마운트하고 ueventd 로 노드를 만들기 때문에, 여기서 /dev 를
 // 점유하면 덮이거나 방해가 된다. 확인만 하고 원상복구한다.
@@ -378,7 +519,14 @@ int main(int argc, char **argv, char **envp) {
         // 성공이든 실패든 실제 상황을 보고한다. 실패 경로에서 개수를 안 찍는 바람에
         // "몇 개가 있긴 한가"조차 알 수 없었다.
         put_num("vport node count=", found);
-        put_line("vport nodes: ", found > 0 ? names : "(없음)");
+        put_line("vport nodes: ", found > 0 ? names : "(none)");
+
+        // 디스크가 fstab 이 기대하는 이름으로 올라왔는지 확인하고, 아니면 고친다.
+        // 반드시 scratch_unmount 앞에서. 라벨을 읽으려면 devtmpfs 가 붙어 있어야 한다.
+        int disk_wait = wait_for_disks(3000);
+        put_fmt("disks visible=%d waited_ms=%d", count_disks(), disk_wait);
+        fixup_fstab("/fstab.ranchu");
+
         scratch_unmount();
     }
 
