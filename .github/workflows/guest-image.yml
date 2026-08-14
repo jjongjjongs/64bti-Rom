@@ -378,8 +378,16 @@ jobs:
             # "Permission X not defined in policy" 류는 5.10 커널이 정의하는 권한을
             # Android 7 정책이 모를 뿐이라 무해한데, 수십 줄이라 정작 볼 것을 밀어낸다.
             grep -aE "init\.wrapper|vport|virtio.console|binder|ashmem|Kernel panic|Run /|first stage|second stage|Security failure|Freeing initrd|reboot:|mount|zygote|Zygote|ueventd|servicemanager|surfaceflinger|SurfaceFlinger|bootanim|system_server|ActivityManager|Starting|failed|error|cgroup|xattr" "$f" \
-              | grep -avE "not defined in policy|Class .* not defined" \
+              | grep -avE "not defined in policy|Class .* not defined|wd t=" \
               | sed 's/^\[[0-9. ]*\] //' | awk '!seen[$0]++' | head -45
+            # 감시자 출력은 따로 뽑는다. 틱마다 여러 줄이라 위 필터에 섞으면 다 밀어낸다.
+            # 부팅이 조용해진 뒤 누가 무엇을 붙들고 있는지는 여기에만 남는다.
+            if grep -aq "wd t=" "$f"; then
+              echo "  --- 감시자(마지막 70줄) ---"
+              grep -a "wd t=" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -70
+            else
+              echo "  --- 감시자 출력 없음 (fork 실패했거나 init 이 곧바로 죽음) ---"
+            fi
             echo "  --- 마지막 12줄 ---"
             tail -n 24 "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!s2[$0]++' | tail -12
           done
