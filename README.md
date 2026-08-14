@@ -11,43 +11,165 @@ versionName 0.2.0)를 [jadx](https://github.com/skylot/jadx) 1.5.6으로 역디�
 
 | 구성 | 상태 |
 |---|---|
-| `app/src/main/java/com/example/singlevm/**` | jadx로 복구한 커스텀 코드. 컴파일 가능한 수준으로 읽히지만, 원본 변수명/주석은 유실됨 |
-| `app/src/main/java/org/libsdl/app/**` | SDL2 안드로이드 프로젝트의 표준 Java 글루 코드 (zlib 라이선스, 커스텀 아님). **추후 [libsdl-org/SDL](https://github.com/libsdl-org/SDL) 공식 소스로 교체 권장** |
-| `app/src/main/AndroidManifest.xml`, `res/**` | jadx가 실제로 디코딩한 리소스 — 원본과 동일 |
+| `app/src/main/java/com/example/singlevm/**` | jadx로 복구한 커스텀 코드. **jadx 산출물 그대로는 컴파일 불가였고(오류 30개), 수정 완료.** 원본 변수명/주석은 유실됨 |
+| `app/src/main/java/org/libsdl/app/**` | SDL2 안드로이드 프로젝트의 표준 Java 글루 코드 (zlib 라이선스, 커스텀 아님). **현재 앱에서 전혀 사용되지 않음** — 아래 "SDL 계층은 죽은 코드" 참고 |
+| `app/src/main/AndroidManifest.xml`, `res/**` | jadx가 실제로 디코딩한 리소스 — 원본과 동일 (AGP 8 호환을 위해 매니페스트 일부 정리) |
 | `app/src/main/jniLibs/arm64-v8a/*.so` | apk에서 그대로 추출한 **컴파일된 바이너리**. 디컴파일 불가 (기계어) |
 
-## 네이티브 라이브러리 정체 (교체 대상)
+## 빌드
 
-`.so` 바이너리는 소스가 아니라 다음 오픈소스 프로젝트들의 빌드 산출물로 추정됩니다.
-빌드를 진짜 소스 기반으로 되돌리려면 아래를 서브모듈로 넣고 다시 빌드해야 합니다.
+```sh
+./gradlew :app:assembleDebug
+```
 
-- `libqemu-system-aarch64.so`, `libslirp.so` → [qemu/qemu](https://github.com/qemu/qemu) (버전 확인 필요)
-- `libglib-2.0.so` → GLib
-- `libpixman-1.so` → pixman
-- `libSDL2.so`, `libcompat-SDL2-*.so` → [libsdl-org/SDL](https://github.com/libsdl-org/SDL)
-- `libcompat-limbo.so`, `libcompat-musl.so` → Limbo(QEMU 안드로이드 프론트엔드) 계열로 추정, 정확한 포크 확인 필요
-- `libemugl_host_android.so`, `libemugl_probe.so` → AOSP 에뮬레이터 emugl (GPU 에뮬레이션)
-- `libpodroid-launcher.so`, `libsinglevm_qemu.so`, `libsinglevm_runtime.so` → **커스텀 글루 코드로 추정, 소스 없음 (재작성 필요)**
+필요 환경:
 
-## 앱 구조 (jadx 복구 기준)
+- JDK 17 이상 (JDK 21에서 확인)
+- Android SDK Platform 34 + Build-Tools 34.x
+- Gradle wrapper 8.7 (저장소에 포함, 자동 다운로드)
+- NDK는 **불필요**. `.so`는 이미 빌드된 바이너리를 그대로 패키징만 함
 
-- `MainActivity` — 게스트 이미지 목록/설정 UI (1589줄)
-- `GuestRunActivity` — 실제 VM 구동, 별도 프로세스(`:vm`)로 실행 (매니페스트에서 확인)
-- `engine/EngineRegistry` — 두 엔진 어댑터를 등록/선택
-  - `Android7GuestEngineAdapter` — QEMU 기반 최신(Android7) 게스트
-  - `LegacyArmEngineAdapter` — libcompat-limbo/musl 기반 레거시 ARM 호환 경로
-- 외부 의존성: androidx/Compose 없음, 순수 `android.*` SDK + `org.json` (jadx import 기준 확인)
+`local.properties`에 SDK 경로를 지정하거나 `ANDROID_HOME`을 설정하세요:
+
+```sh
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+```
+
+### 이 저장소의 CI/컨테이너 환경 제약
+
+자동화 환경에서는 `dl.google.com`이 이그레스 정책으로 차단되어 있어
+**Android SDK와 AGP(Android Gradle Plugin) 자체를 받을 수 없습니다.**
+(`maven.google.com`도 `dl.google.com`으로 리다이렉트됩니다.)
+따라서 그 환경에서는 `./gradlew assembleDebug`가 다음에서 실패합니다:
+
+```
+Plugin [id: 'com.android.application', version: '8.5.0'] was not found
+```
+
+SDK가 있는 로컬 머신에서는 정상 동작해야 합니다. SDK 없이 자바 소스만
+검증하려면:
+
+```sh
+./tools/verify-compile.sh
+```
+
+Maven Central의 Robolectric `android-all` (API 34) jar를 프레임워크 스텁으로
+써서 `javac`만 돌립니다. APK는 만들지 않고 리소스(`R.*`) 참조도 검증하지
+않지만, 자바 레벨 오류는 전부 잡습니다. 현재 **오류 0개**이며 남은 경고는
+SDL 보일러플레이트의 deprecation과 `PackageInfo.versionCode` 레거시 폴백뿐입니다
+(후자는 `Build.VERSION.SDK_INT` 분기로 의도된 것).
+
+## 네이티브 라이브러리 정체 (실측)
+
+`.so` 바이너리에서 ELF 메타데이터/문자열로 확인한 결과입니다. README 초안의 추정과
+달리, 이 `.so` 묶음은 **서로 다른 두 세대의 빌드가 겹쳐 쌓인 상태**입니다.
+
+### 세대 A — 현재 실제로 쓰이는 QEMU 경로 (NDK r27 / clang 18.0.3)
+
+| 파일 | 정체 | 근거 |
+|---|---|---|
+| `libqemu-system-aarch64.so` | **QEMU 11.0.2** (PIE 실행파일, .so가 아님) | `QEMU emulator version 11.0.2`, 빌드 경로 `/qemu-11.0.2/include/qemu/...`, `/opt/qemu-out/etc/qemu/` |
+| `libslirp.so` | **libslirp** (QEMU meson subproject로 빌드) | 빌드 경로 `../subprojects/slirp/src/*.c` |
+| `libpodroid-launcher.so` | **커스텀 4.9KB exec 래퍼** (PIE 실행파일) | `podroid-launcher: usage: launcher <qemu-path> [args...]`, `execv` |
+
+`libqemu-system-aarch64.so`의 `NEEDED`는 `libslirp/libz/libm/libdl/libc`뿐입니다.
+즉 **glib과 pixman은 QEMU 바이너리에 정적 링크**되어 있고, 아래 세대 B의
+`libglib-2.0.so` / `libpixman-1.so`는 이 경로에서 쓰이지 않습니다.
+
+### 세대 B — Limbo 계열 레거시 묶음 (2018년경 prebuilt)
+
+| 파일 | 정체 | 근거 |
+|---|---|---|
+| `libglib-2.0.so` | **GLib 2.56.1** | `glib_major/minor/micro_version` 전역값을 .rodata에서 직접 읽음 |
+| `libpixman-1.so` | **pixman 0.40.0** | `pixman_version_string` 상수 |
+| `libSDL2.so` | **SDL 2.0.8 계열** (git 이전 hg 리비전) | `SDL_GetRevision` 문자열 `hg-11914:f1084c419f33` |
+| `libcompat-limbo.so`, `libcompat-musl.so` | **Limbo(QEMU 안드로이드 프론트엔드) 호환 셈** | `LIMBO_JNI_READY storage=%s`, glib/pixman이 이 둘을 `NEEDED`로 링크 |
+| `libcompat-SDL2-ext.so`, `libcompat-SDL2-addons.so` | Limbo의 SDL2 보조 셈 | `libcompat-SDL2-ext.so`만 `libSDL2.so`를 `NEEDED` |
+
+### 세대 C — 커스텀 JNI 글루 (NDK r26 / clang 17.0.2, 소스 없음)
+
+| 파일 | export하는 JNI 심볼 | 상태 |
+|---|---|---|
+| `libsinglevm_runtime.so` | `MainActivity.nativeProbeRuntime`, `GuestRunActivity.nativeStartGuest` / `nativeRunFrame` / `nativeAttachSurface` / `nativeDetachSurface` | 자바 선언과 **일치**. 레거시 엔진 경로에서 사용 중 |
+| `libemugl_probe.so` | `GuestRunActivity.nativeProbeEmugl` / `nativeAttachEmuglSurface` / `nativeDetachEmuglSurface` / `nativeStartEmuglBridge` | 자바 선언과 **일치**. Android7 엔진 경로에서 사용 중 |
+| `libsinglevm_qemu.so` | `GuestRunActivity.nativeBuildQemuArgs` / `nativeQemuProbe` / `nativeStartAndroid7Guest` | ⚠️ **자바 쪽에 대응 선언이 없음 — 죽은 바이너리** |
+| `libemugl_host_android.so` | (JNI export 없음) | `libemugl_probe.so`가 dlopen하는 것으로 추정 |
+
+**`libsinglevm_qemu.so`가 죽은 이유**: 자바 코드가 JNI로 QEMU를 띄우던 방식에서
+`ProcessBuilder`로 QEMU 실행파일을 exec하는 방식(`buildModernQemuCommand` +
+`startAndroid7Guest`)으로 이미 옮겨갔기 때문입니다. 그런데
+`Android7GuestEngineAdapter.inspect()`는 여전히 `libsinglevm_qemu.so`의 **존재
+여부**를 부팅 준비 완료 조건으로 검사합니다. 파일만 있으면 통과하므로 동작에는
+문제가 없지만, 실제로 호출되지는 않는 잔재입니다.
+
+### SDL 계층은 죽은 코드
+
+- `com.example.singlevm`의 어떤 코드도 SDL을 참조하지 않습니다. 앱이 로드하는 것은
+  `singlevm_runtime`과 `emugl_probe` 둘뿐입니다.
+- 매니페스트에 `SDLActivity`가 등록되어 있지 않습니다.
+- `libSDL2.so`를 `NEEDED`로 잡는 것은 `libcompat-SDL2-ext.so` 하나뿐이고, 그것도
+  현재 실행 경로에서 로드되지 않습니다.
+- 게다가 Java 글루(`nativeSetupJNI` 존재 → SDL 2.0.10+)와 `libSDL2.so`(hg-11914 →
+  2.0.8 계열)의 **버전이 서로 어긋납니다.**
+
+따라서 SDL 계층은 "공식 소스로 교체"보다 **먼저 제거 여부를 판단**하는 것이 맞습니다.
+
+## 서브모듈 교체 계획
+
+`.so`를 소스 기반으로 되돌리는 작업은 세대별로 난이도가 크게 다릅니다.
+현재 실행 경로(세대 A)만 재현하면 앱은 동작하므로, 이 순서를 권장합니다.
+
+**1단계 — 세대 A만 소스화 (실질적으로 이것만 하면 됨)**
+
+```sh
+git submodule add https://gitlab.com/qemu-project/qemu.git third_party/qemu
+git -C third_party/qemu checkout v11.0.2
+```
+
+- `libslirp`는 QEMU의 `subprojects/slirp`로 함께 빌드됩니다 (별도 서브모듈 불필요).
+  QEMU 트리의 `subprojects/*.wrap`이 고정 커밋을 가리키므로 버전도 자동으로 맞습니다.
+- glib/pixman은 QEMU에 정적 링크되어 있으므로, QEMU 빌드 시 정적 링크로 함께
+  해결하면 됩니다. 별도 서브모듈로 뺄 필요 없음.
+- NDK r27(clang 18.0.3)로 빌드. 원본과 동일 툴체인.
+- 산출물은 `.so` 확장자를 단 PIE 실행파일이어야 합니다 (안드로이드가 `lib*.so`만
+  네이티브 디렉터리에 풀어주기 때문에 쓰는 관용적 트릭).
+
+**2단계 — 커스텀 글루 재작성 (세대 C, 소스 없음)**
+
+- `libpodroid-launcher.so`: 4.9KB짜리 `execv` 래퍼. 사실상 재작성이 자명함
+  (`main(argc, argv)` → `execv(argv[1], argv+1)`). 가장 먼저 처리 권장.
+- `libsinglevm_runtime.so`, `libemugl_probe.so`, `libemugl_host_android.so`:
+  원 작성자 확인 또는 재작성 필요. `libemugl_*`는 AOSP 에뮬레이터 emugl 계열로
+  보이지만 확증은 못 했습니다.
+- `libsinglevm_qemu.so`: 죽은 바이너리이므로 **재작성 대상이 아니라 삭제 후보**.
+  단, `Android7GuestEngineAdapter`의 준비 검사에서 함께 빼야 합니다.
+
+**3단계 — 세대 B 처리**
+
+Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현재
+실행 경로에서 쓰이지 않습니다. 소스로 교체하기보다 **APK에서 빼는 것이 우선**이고,
+빼도 동작하는지 확인 후 제거하면 APK가 크게 줄어듭니다.
 
 ## 알려진 리소스 (매니페스트 실측값)
 
 - `applicationId` / `namespace`: `com.example.singlevm`
 - `minSdk 24` / `targetSdk 34` / `compileSdk 34`
 - `versionCode 1`, `versionName "0.2.0"`
-- `debuggable=true` (원본 apk 자체가 디버그 빌드였음 — release 빌드 전 반드시 false로)
+- 원본 apk는 debug 빌드였음 (`debuggable=true`). 지금은 매니페스트 하드코딩 대신
+  `buildTypes.debug`에서 관리하므로 release 빌드에는 자동으로 빠집니다.
+- `extractNativeLibs=true`는 **필수**입니다. QEMU와 launcher가 `.so`가 아니라
+  실제로 exec되는 실행파일이라, 압축 해제되어 실파일로 존재해야 합니다.
+  `app/build.gradle.kts`의 `jniLibs.useLegacyPackaging = true`가 이를 보장합니다.
 
 ## TODO
 
-- [ ] `MainActivity` / `GuestRunActivity` 실제 로직 리뷰 (jadx 결과라 변수명이 `p0`, `str2` 등으로 난해한 부분 있음)
-- [ ] 네이티브 라이브러리 진짜 버전/커밋 특정 후 서브모듈로 교체
-- [ ] `libpodroid-launcher.so` / `libsinglevm_*.so` 재작성 (또는 원 작성자 확인)
-- [ ] `debuggable=true` → release 빌드 시 제거
+- [x] jadx 산출물 컴파일 오류 수정 (30개)
+- [x] 난해한 변수명/인라인 상수 정리
+- [x] 빌드 설정 AGP 8 호환화 + Gradle wrapper 추가
+- [x] 네이티브 라이브러리 진짜 버전 특정
+- [ ] SDK 있는 환경에서 `./gradlew :app:assembleDebug` 실제 통과 확인
+- [ ] QEMU 11.0.2 서브모듈 추가 및 NDK r27로 재빌드
+- [ ] `libpodroid-launcher.so` 재작성 (가장 쉬움)
+- [ ] `libsinglevm_qemu.so` 제거 + `Android7GuestEngineAdapter` 준비 검사에서 제외
+- [ ] SDL 계층(`org/libsdl/app/**` + `libSDL2.so` + `libcompat-SDL2-*`) 제거 검토
+- [ ] 세대 B prebuilt 제거 후 동작 확인 (APK 크기 대폭 감소)
