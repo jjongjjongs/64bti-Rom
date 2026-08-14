@@ -304,9 +304,45 @@ static void probe_data_mount(void) {
     rmdir(probe_dir);
 }
 
+// binder 가 없으면 servicemanager 부터 모든 바인더 클라이언트가 죽고, init 은 critical
+// 서비스가 반복 실패했다고 판단해 recovery 로 리부트한다. 커널에 드라이버가 없는 것인지
+// 노드만 안 만들어진 것인지에 따라 고칠 곳이 완전히 다르므로, 둘을 갈라서 본다.
+static void probe_binder(void) {
+    const char *nodes[] = {"/dev/binder", "/dev/hwbinder", "/dev/vndbinder", "/dev/binderfs"};
+    for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
+        put_fmt("wd dev: %s %s", nodes[i], access(nodes[i], F_OK) == 0 ? "exists" : "MISSING");
+    }
+    // 커널에 드라이버가 들어 있으면 misc 클래스에 등록돼 있다. 여기 있는데 /dev 에
+    // 없으면 ueventd 문제, 여기도 없으면 커널 설정 문제다.
+    put_fmt("wd dev: /sys/class/misc/binder %s",
+            access("/sys/class/misc/binder", F_OK) == 0 ? "exists" : "MISSING");
+
+    char fs[4096];
+    if (read_small("/proc/filesystems", fs, sizeof(fs)) > 0) {
+        put_fmt("wd dev: binderfs in /proc/filesystems: %s", strstr(fs, "binder") ? "yes" : "no");
+    }
+
+    // misc 클래스에 실제로 무엇이 등록돼 있는지. 이름을 봐야 추측을 멈출 수 있다.
+    DIR *d = opendir("/sys/class/misc");
+    if (!d) { put_line("wd dev: /sys/class/misc unreadable", NULL); return; }
+    char list[384];
+    size_t used = 0;
+    list[0] = '\0';
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        int n = snprintf(list + used, sizeof(list) - used, "%s%s", used ? " " : "", e->d_name);
+        if (n < 0 || (size_t)n >= sizeof(list) - used) break;
+        used += (size_t)n;
+    }
+    closedir(d);
+    put_fmt("wd dev: misc class: %s", used ? list : "(empty)");
+}
+
 static void watchdog_main(void) {
     int data_seen = 0;
     int probed = 0;
+    int binder_probed = 0;
     for (int tick = 1; tick <= WD_MAX_TICKS; tick++) {
         sleep_ms(WD_PERIOD_MS);
         int secs = tick * (WD_PERIOD_MS / 1000);
@@ -326,6 +362,12 @@ static void watchdog_main(void) {
         }
         // /data 가 아직이면 누가 무엇을 붙들고 있는지 전체 표를 뜬다. 마운트가 끝난 뒤에도
         // 표를 계속 찍으면 정작 봐야 할 뒷부분을 밀어내므로 그때는 요약만 남긴다.
+        // 게스트는 이제 30초쯤에 recovery 로 리부트한다. binder 확인은 그 전에 끝나야 한다.
+        if (!binder_probed && secs >= 10) {
+            binder_probed = 1;
+            probe_binder();
+        }
+
         // fs_mgr 에게 충분히 시간을 준 뒤(항목당 최대 20초 대기가 있다) 한 번만 확인한다.
         if (!data_seen && !probed && secs >= 30) {
             probed = 1;

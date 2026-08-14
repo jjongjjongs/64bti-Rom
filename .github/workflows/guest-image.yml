@@ -406,8 +406,8 @@ jobs:
               echo "  --- QEMU 경고 ---"; head -c 1200 "$q"; echo
             done
             echo "  --- 게스트가 직접 확인한 결과 ---"
-            if grep -aq "init\.wrapper: wd probe" "$f"; then
-              grep -a "init\.wrapper: wd probe" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!p[$0]++' | head -20
+            if grep -aqE "init\.wrapper: wd (probe|dev)" "$f"; then
+              grep -aE "init\.wrapper: wd (probe|dev)" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!p[$0]++' | head -24
             else
               echo "  (probe 출력 없음 — /data 가 붙었거나 감시자가 죽음)"
             fi
