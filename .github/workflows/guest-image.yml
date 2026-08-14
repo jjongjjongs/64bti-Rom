@@ -145,6 +145,60 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 폰으로 왕복하지 않고 여기서 바로 부팅시켜 본다. 앱이 만드는 것과 동일한 명령줄을
+      # 쓰므로, 여기서 안 뜨면 폰에서도 안 뜬다. 실패해도 아티팩트는 올려야 하니 죽이지 않는다.
+      - name: Smoke boot the guest under QEMU
+        continue-on-error: true
+        env:
+          BOOT_SECONDS: "150"
+        run: |
+          sudo apt-get install -y -qq qemu-system-arm
+          WORK="$GITHUB_WORKSPACE/guest-out"
+          BOOT=/tmp/boot && mkdir -p "$BOOT/transport"
+
+          echo "커널 파일 종류: $(file -b "$WORK/kernel")"
+
+          ARGS=(-machine virt,gic-version=3 -cpu cortex-a15
+                -accel tcg,thread=multi,tb-size=256 -smp 2 -m 1024
+                -display none -no-reboot
+                -device virtio-gpu-device,xres=480,yres=800
+                -device virtio-serial-device)
+          for i in 0 1 2 3 4 5 6 7; do
+            ARGS+=(-chardev "socket,id=singlevmpipe$i,path=$BOOT/transport/pipe$i.sock,server=on,wait=off")
+            ARGS+=(-device "virtserialport,chardev=singlevmpipe$i,name=org.singlevm.pipe.$i")
+          done
+          ARGS+=(-monitor none -nic none
+                 -serial "file:$BOOT/serial.log"
+                 -kernel "$WORK/kernel" -initrd "$WORK/ramdisk.img"
+                 -drive "if=none,id=system,format=raw,readonly=on,file=$WORK/system.img"
+                 -device virtio-blk-device,drive=system
+                 -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
+
+          echo "==> ${BOOT_SECONDS}초 부팅 시도"
+          timeout "$BOOT_SECONDS" qemu-system-aarch64 "${ARGS[@]}" > /tmp/qemu-stdout.log 2>&1 || true
+
+          SIZE=$(stat -c%s "$BOOT/serial.log" 2>/dev/null || echo 0)
+          {
+            echo "## 스모크 부팅 결과"
+            echo "시리얼 출력: ${SIZE} bytes"
+            echo '```'
+            if [ "$SIZE" -gt 0 ]; then head -c 20000 "$BOOT/serial.log"; else echo "(무음 — 커널이 아무것도 출력하지 않음)"; fi
+            echo '```'
+            echo "### QEMU 자체 출력"
+            echo '```'
+            head -c 4000 /tmp/qemu-stdout.log || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-boot-logs
+          path: |
+            /tmp/boot/serial.log
+            /tmp/qemu-stdout.log
+          if-no-files-found: warn
+
       - name: Show disk space after
         if: always()
         run: df -h /
