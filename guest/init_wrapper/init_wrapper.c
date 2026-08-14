@@ -62,10 +62,37 @@ static void log_open(const char *dev_root) {
     if (g_log < 0) g_log = 2;  // 커널이 넘겨준 stderr 에 기대본다
 }
 
-static int wait_for(const char *path, int timeout_ms) {
+/**
+ * Counts virtio-serial port nodes and records the first few names.
+ *
+ * Deliberately matches any vport* rather than a fixed name: port 0 of a virtio-serial bus is
+ * reserved for the console, so ports added with -device virtserialport are numbered from
+ * /dev/vport0p1 upwards. Waiting on /dev/vport0p0 waits for something that is never created.
+ */
+static int count_vports(char *names, size_t names_len) {
+    DIR *d = opendir(SCRATCH_DEV);
+    if (!d) return -1;
+    int n = 0;
+    size_t used = 0;
+    if (names && names_len) names[0] = '\0';
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "vport", 5) != 0) continue;
+        n++;
+        if (names && used + strlen(e->d_name) + 2 < names_len) {
+            if (used) { names[used++] = ' '; names[used] = '\0'; }
+            strcpy(names + used, e->d_name);
+            used += strlen(e->d_name);
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+static int wait_for_vport(int timeout_ms) {
     int waited = 0;
     while (waited <= timeout_ms) {
-        if (access(path, F_OK) == 0) return waited;
+        if (count_vports(NULL, 0) > 0) return waited;
         struct timespec ts = {0, VPORT_POLL_MS * 1000000L};
         nanosleep(&ts, NULL);
         waited += VPORT_POLL_MS;
@@ -87,18 +114,6 @@ static void scratch_unmount(void) {
     rmdir(SCRATCH_DEV);
 }
 
-static int count_vports(void) {
-    DIR *d = opendir(SCRATCH_DEV);
-    if (!d) return -1;
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "vport", 5) == 0) n++;
-    }
-    closedir(d);
-    return n;
-}
-
 int main(int argc, char **argv, char **envp) {
     (void)argc;
 
@@ -111,17 +126,20 @@ int main(int argc, char **argv, char **envp) {
     } else {
         // 4번 관문: virtio-serial 포트가 실제로 보이는가.
         // 없으면 emugl 전송로가 없다는 뜻이고, 부팅이 끝까지 가더라도 화면은 안 나온다.
-        char vport0[256];
-        snprintf(vport0, sizeof(vport0), "%s/vport0p0", SCRATCH_DEV);
-        int waited = wait_for(vport0, VPORT_WAIT_MS);
+        char names[256];
+        int waited = wait_for_vport(VPORT_WAIT_MS);
+        int found = count_vports(names, sizeof(names));
         if (waited < 0) {
-            put_line("FAIL /dev/vport0p0 never appeared", NULL);
-            put_line("  -> check CONFIG_VIRTIO_CONSOLE in the guest kernel", NULL);
+            put_line("FAIL no /dev/vport* appeared", NULL);
+            put_line("  -> check CONFIG_VIRTIO_CONSOLE=y in the guest kernel", NULL);
             put_line("  -> host attaches 8 ports via virtio-serial-device (mmio)", NULL);
         } else {
-            put_num("OK vport0p0 present, waited_ms=", waited);
-            put_num("OK vport nodes found=", count_vports());
+            put_num("OK virtio-serial ports present, waited_ms=", waited);
         }
+        // 성공이든 실패든 실제 상황을 보고한다. 실패 경로에서 개수를 안 찍는 바람에
+        // "몇 개가 있긴 한가"조차 알 수 없었다.
+        put_num("vport node count=", found);
+        put_line("vport nodes: ", found > 0 ? names : "(없음)");
         scratch_unmount();
     }
 

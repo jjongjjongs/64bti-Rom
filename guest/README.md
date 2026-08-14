@@ -30,12 +30,18 @@ NDK가 없으면 `arm-linux-gnueabihf-gcc`로 폴백합니다(검증용). 빌드
 
 ```
 init.wrapper: start (rdinit, PID 1)
-init.wrapper: OK vport0p0 present, waited_ms=0
-init.wrapper: OK vport nodes found=8
+init.wrapper: OK virtio-serial ports present, waited_ms=0
+init.wrapper: vport node count=8
+init.wrapper: vport nodes: vport0p1 vport0p2 ... vport0p8
 init.wrapper: exec /init
 ```
 
-`FAIL /dev/vport0p0 never appeared`가 나오면 게스트 커널에
+> **포트 번호는 1부터입니다.** virtio-serial 버스의 포트 0은 콘솔용으로 예약되어
+> 있어서 `-device virtserialport`로 붙인 포트는 `/dev/vport0p1`부터 매겨집니다.
+> 초기 버전은 `/dev/vport0p0`을 기다렸는데, 그건 애초에 생기지 않는 이름이라
+> 커널이 멀쩡한데도 계속 실패로 보고했습니다.
+
+`FAIL no /dev/vport* appeared`가 나오면 게스트 커널에
 `CONFIG_VIRTIO_CONSOLE`이 빠진 것입니다. 부팅이 끝까지 가더라도 emugl 전송로가
 없어 화면은 나오지 않으므로, 여기서 멈추고 커널부터 고쳐야 합니다.
 
