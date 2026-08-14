@@ -165,6 +165,14 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
   실제로 exec되는 실행파일이라, 압축 해제되어 실파일로 존재해야 합니다.
   `app/build.gradle.kts`의 `jniLibs.useLegacyPackaging = true`가 이를 보장합니다.
 
+## 문서
+
+- [docs/GUEST-IMAGE.md](docs/GUEST-IMAGE.md) — **게스트 이미지 만드는 절차.**
+  지금 비어 있는 유일한 조각이며, 여기부터 시작하면 됩니다. PC의 데스크톱 QEMU에서
+  먼저 부팅시키는 방법(검증된 명령줄 포함)이 들어 있습니다.
+- [docs/ARCHITECTURE-NOTES.md](docs/ARCHITECTURE-NOTES.md) — 왜 아직 게임이 실행되지
+  않는지, `.so` 실측 결과, 접근 방식 비교.
+
 ## TODO
 
 - [x] jadx 산출물 컴파일 오류 수정 (30개)
@@ -172,6 +180,10 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
 - [x] 빌드 설정 AGP 8 호환화 + Gradle wrapper 추가
 - [x] 네이티브 라이브러리 진짜 버전 특정
 - [x] `./gradlew :app:assembleDebug` 실제 통과 확인 (CI, APK 아티팩트 생성)
+- [ ] **게스트 이미지 제작** (kernel + ramdisk/init.wrapper) — 최우선, docs/GUEST-IMAGE.md 참고
+- [ ] `/dev/qemu_pipe` → virtio-serial 다중화 방식 결정 (docs/GUEST-IMAGE.md 4.2)
+- [ ] virtio 버스 통일 여부 결정: PCI 유지 vs MMIO 전환 (docs/GUEST-IMAGE.md 3.2)
+- [ ] 게스트 부팅 성공 후: APK를 게스트로 넘기는 통로 구현
 - [ ] QEMU 11.0.2 서브모듈 추가 및 NDK r27로 재빌드
 - [ ] `libpodroid-launcher.so` 재작성 (가장 쉬움)
 - [ ] `libsinglevm_qemu.so` 제거 + `Android7GuestEngineAdapter` 준비 검사에서 제외
