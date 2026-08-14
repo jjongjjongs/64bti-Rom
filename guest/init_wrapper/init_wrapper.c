@@ -246,8 +246,31 @@ static void wd_table(int secs) {
     closedir(d);
 }
 
+// fs_mgr 가 /data 를 왜 거부했는지 로그로 말해주지 않으면, 직접 붙여보는 것이 가장 빠른
+// 답이다. 붙으면 파일시스템은 멀쩡하고 문제는 fstab 항목/옵션 쪽이라는 뜻이고, 안 붙으면
+// errno 가 곧 이유다. 읽기 전용으로 붙였다 바로 뗀다.
+static void probe_data_mount(void) {
+    const char *dev = "/dev/block/vdc";
+    if (access(dev, F_OK) != 0) {
+        put_fmt("wd probe: %s does not exist", dev);
+        return;
+    }
+    if (mkdir("/wd_probe", 0755) != 0 && errno != EEXIST) {
+        put_fmt("wd probe: mkdir failed: %s", strerror(errno));
+        return;
+    }
+    if (mount(dev, "/wd_probe", "ext4", MS_RDONLY, NULL) == 0) {
+        put_fmt("wd probe: %s mounts as ext4 ro -> filesystem is fine, fs_mgr refused it", dev);
+        umount("/wd_probe");
+    } else {
+        put_fmt("wd probe: mount %s ext4 ro failed: %s (errno=%d)", dev, strerror(errno), errno);
+    }
+    rmdir("/wd_probe");
+}
+
 static void watchdog_main(void) {
     int data_seen = 0;
+    int probed = 0;
     for (int tick = 1; tick <= WD_MAX_TICKS; tick++) {
         sleep_ms(WD_PERIOD_MS);
         int secs = tick * (WD_PERIOD_MS / 1000);
@@ -267,6 +290,12 @@ static void watchdog_main(void) {
         }
         // /data 가 아직이면 누가 무엇을 붙들고 있는지 전체 표를 뜬다. 마운트가 끝난 뒤에도
         // 표를 계속 찍으면 정작 봐야 할 뒷부분을 밀어내므로 그때는 요약만 남긴다.
+        // fs_mgr 에게 충분히 시간을 준 뒤(항목당 최대 20초 대기가 있다) 한 번만 확인한다.
+        if (!data_seen && !probed && secs >= 30) {
+            probed = 1;
+            probe_data_mount();
+        }
+
         int every = data_seen ? WD_TABLE_EVERY * 4 : WD_TABLE_EVERY;
         if (tick % every == 0) wd_table(secs);
     }

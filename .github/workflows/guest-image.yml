@@ -267,7 +267,7 @@ jobs:
                  -device virtio-blk-device,drive=cache
                  -drive "if=none,id=userdata,format=raw,file=$WORK/userdata.img"
                  -device virtio-blk-device,drive=userdata
-                 -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel androidboot.console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
+                 -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on androidboot.console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
 
           boot_with() {   # $1 = 라벨, $2 = 커널 경로
             local label="$1" kern="$2"

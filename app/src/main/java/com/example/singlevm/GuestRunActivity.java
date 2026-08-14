@@ -69,7 +69,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      * before driver probing, and keep_bootcon stops it being handed off and silenced.
      */
     private static final String DEFAULT_KERNEL_CMDLINE =
-            "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel"
+            "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on"
                     + " androidboot.hardware=ranchu androidboot.selinux=permissive"
                     + " binder.devices=binder,hwbinder,vndbinder"
                     + " rdinit=/init.wrapper root=/dev/ram0 rw";
