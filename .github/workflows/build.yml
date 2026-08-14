@@ -27,15 +27,28 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      - name: Verify native libs are packaged uncompressed-free (extractNativeLibs)
+      - name: Verify native libs are packaged for extraction
         run: |
-          # libqemu-system-aarch64.so / libpodroid-launcher.so are PIE executables
-          # that GuestRunActivity execs by path, so they must be extractable.
+          # libqemu-system-aarch64.so and libpodroid-launcher.so are PIE executables
+          # that GuestRunActivity execs by path from nativeLibraryDir, so they must be
+          # unpacked to real files at install time (extractNativeLibs=true).
+          #
+          # That maps directly onto the zip compression method: legacy packaging
+          # DEFLATEs the libs and the installer extracts them, whereas modern
+          # packaging STOREs them page-aligned to be mapped straight out of the APK.
+          # So asserting "Defl" is a real check that useLegacyPackaging=true held.
+          # (Grepping the binary manifest for the attribute name does not work --
+          # its string pool is UTF-16, so an ASCII grep silently never matches.)
           apk=app/build/outputs/apk/debug/app-debug.apk
-          unzip -l "$apk" | grep -E "lib/arm64-v8a/(libqemu-system-aarch64|libpodroid-launcher)\.so"
-          if unzip -p "$apk" AndroidManifest.xml | grep -qa extractNativeLibs; then
-            echo "extractNativeLibs attribute present in manifest"
-          fi
+          for lib in libqemu-system-aarch64 libpodroid-launcher; do
+            line=$(unzip -v "$apk" | grep -E "lib/arm64-v8a/$lib\.so$") \
+              || { echo "::error::$lib.so missing from APK"; exit 1; }
+            echo "$line"
+            case "$line" in
+              *Defl*) ;;
+              *) echo "::error::$lib.so is not deflated -- extractNativeLibs is off, QEMU will not start"; exit 1 ;;
+            esac
+          done
 
       - uses: actions/upload-artifact@v4
         with:

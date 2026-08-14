@@ -35,18 +35,22 @@ versionName 0.2.0)를 [jadx](https://github.com/skylot/jadx) 1.5.6으로 역디�
 echo "sdk.dir=$HOME/Android/Sdk" > local.properties
 ```
 
-### 이 저장소의 CI/컨테이너 환경 제약
+CI(`.github/workflows/build.yml`)에서 `assembleDebug`가 통과하는 것을 확인했습니다.
+GitHub Actions 러너에는 SDK가 있고 네트워크 제한이 없습니다. APK는 워크플로
+아티팩트(`app-debug-apk`)로 올라갑니다.
 
-자동화 환경에서는 `dl.google.com`이 이그레스 정책으로 차단되어 있어
+### 샌드박스 환경 제약
+
+일부 자동화/샌드박스 환경에서는 `dl.google.com`이 이그레스 정책으로 차단되어
 **Android SDK와 AGP(Android Gradle Plugin) 자체를 받을 수 없습니다.**
 (`maven.google.com`도 `dl.google.com`으로 리다이렉트됩니다.)
-따라서 그 환경에서는 `./gradlew assembleDebug`가 다음에서 실패합니다:
+그런 환경에서는 `./gradlew assembleDebug`가 다음에서 실패합니다:
 
 ```
 Plugin [id: 'com.android.application', version: '8.5.0'] was not found
 ```
 
-SDK가 있는 로컬 머신에서는 정상 동작해야 합니다. SDK 없이 자바 소스만
+이건 프로젝트 문제가 아니라 네트워크 정책 문제입니다. SDK 없이 자바 소스만
 검증하려면:
 
 ```sh
@@ -167,7 +171,7 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
 - [x] 난해한 변수명/인라인 상수 정리
 - [x] 빌드 설정 AGP 8 호환화 + Gradle wrapper 추가
 - [x] 네이티브 라이브러리 진짜 버전 특정
-- [ ] SDK 있는 환경에서 `./gradlew :app:assembleDebug` 실제 통과 확인
+- [x] `./gradlew :app:assembleDebug` 실제 통과 확인 (CI, APK 아티팩트 생성)
 - [ ] QEMU 11.0.2 서브모듈 추가 및 NDK r27로 재빌드
 - [ ] `libpodroid-launcher.so` 재작성 (가장 쉬움)
 - [ ] `libsinglevm_qemu.so` 제거 + `Android7GuestEngineAdapter` 준비 검사에서 제외
