@@ -281,6 +281,15 @@ jobs:
                  -device virtio-blk-device,drive=userdata
                  -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on androidboot.console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
 
+          # 게스트가 vdc 를 쓰기 금지로 본다면 그 원인이 호스트 쪽일 수 있다.
+          # 권한과 QEMU 가 읽은 형식을 부팅 직전에 남긴다.
+          {
+            ls -la "$WORK"/*.img
+            for i in system cache userdata; do
+              echo "--- $i.img"; qemu-img info "$WORK/$i.img" 2>&1 | head -5
+            done
+          } > /tmp/boot/images.txt
+
           boot_with() {   # $1 = 라벨, $2 = 커널 경로
             local label="$1" kern="$2"
             local serial="$BOOT/serial-$label.log" stdout="$BOOT/qemu-$label.log"
@@ -360,6 +369,16 @@ jobs:
             cat /tmp/boot/facts.txt
             echo
           fi
+          # QEMU 자체 경고(예: 이미지를 읽기 전용으로 열었다)는 여기에만 나온다.
+          for q in /tmp/boot/qemu-*.log; do
+            [ -f "$q" ] || continue
+            if [ -s "$q" ]; then
+              echo "########## QEMU 경고 ($q)"; head -c 2000 "$q"; echo
+            fi
+          done
+          if [ -f /tmp/boot/images.txt ]; then
+            echo "########## 부팅 직전 이미지 상태"; cat /tmp/boot/images.txt; echo
+          fi
           for f in /tmp/boot/serial-*.log; do
             [ -f "$f" ] || continue
             label=$(basename "$f" .log | sed 's/^serial-//')
@@ -370,13 +389,13 @@ jobs:
             # "Permission X not defined in policy" 류는 5.10 커널이 정의하는 권한을
             # Android 7 정책이 모를 뿐이라 무해한데, 수십 줄이라 정작 볼 것을 밀어낸다.
             grep -aE "init\.wrapper|vport|virtio.console|binder|ashmem|Kernel panic|Run /|first stage|second stage|Security failure|Freeing initrd|reboot:|mount|zygote|Zygote|ueventd|servicemanager|surfaceflinger|SurfaceFlinger|bootanim|system_server|ActivityManager|Starting|failed|error|cgroup|xattr" "$f" \
-              | grep -avE "not defined in policy|Class .* not defined|wd t=" \
+              | grep -avE "not defined in policy|Class .* not defined|init\\.wrapper: wd " \
               | sed 's/^\[[0-9. ]*\] //' | awk '!seen[$0]++' | head -45
             # 감시자 출력은 따로 뽑는다. 틱마다 여러 줄이라 위 필터에 섞으면 다 밀어낸다.
             # 부팅이 조용해진 뒤 누가 무엇을 붙들고 있는지는 여기에만 남는다.
-            if grep -aq "wd t=" "$f"; then
+            if grep -aq "init\.wrapper: wd " "$f"; then
               echo "  --- 감시자(마지막 70줄) ---"
-              grep -a "wd t=" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -70
+              grep -a "init\.wrapper: wd " "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -70
             else
               echo "  --- 감시자 출력 없음 (fork 실패했거나 init 이 곧바로 죽음) ---"
             fi

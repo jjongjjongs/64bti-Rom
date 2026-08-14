@@ -250,6 +250,17 @@ static void wd_table(int secs) {
 // 답이다. 붙으면 파일시스템은 멀쩡하고 문제는 fstab 항목/옵션 쪽이라는 뜻이고, 안 붙으면
 // errno 가 곧 이유다. 읽기 전용으로 붙였다 바로 뗀다.
 static void probe_data_mount(void) {
+    // 커널이 이 장치를 쓰기 금지로 보고 있는가. mount(2) 의 EACCES 는 십중팔구 이것이고,
+    // /sys/block/<dev>/ro 가 그 값을 그대로 보여준다. 세 장치를 나란히 찍어야
+    // "vdc 만 그런가"가 판별된다.
+    const char *disks[] = {"vda", "vdb", "vdc"};
+    for (size_t i = 0; i < sizeof(disks) / sizeof(disks[0]); i++) {
+        char path[64], val[16] = "?";
+        snprintf(path, sizeof(path), "/sys/block/%s/ro", disks[i]);
+        if (read_small(path, val, sizeof(val)) > 0) chomp(val); else strcpy(val, "(unreadable)");
+        put_fmt("wd probe: /sys/block/%s/ro = %s", disks[i], val);
+    }
+
     const char *dev = "/dev/block/vdc";
     if (access(dev, F_OK) != 0) {
         put_fmt("wd probe: %s does not exist", dev);
@@ -259,11 +270,19 @@ static void probe_data_mount(void) {
         put_fmt("wd probe: mkdir failed: %s", strerror(errno));
         return;
     }
-    if (mount(dev, "/wd_probe", "ext4", MS_RDONLY, NULL) == 0) {
-        put_fmt("wd probe: %s mounts as ext4 ro -> filesystem is fine, fs_mgr refused it", dev);
-        umount("/wd_probe");
-    } else {
-        put_fmt("wd probe: mount %s ext4 ro failed: %s (errno=%d)", dev, strerror(errno), errno);
+    // 쓰기 가능으로 한 번, 읽기 전용으로 한 번. rw 만 실패하면 장치가 쓰기 금지인 것이고,
+    // 둘 다 실패하면 파일시스템이나 접근 경로 자체의 문제다.
+    struct { unsigned long flags; const char *what; } tries[] = {
+        {0, "rw"}, {MS_RDONLY, "ro"},
+    };
+    for (size_t i = 0; i < sizeof(tries) / sizeof(tries[0]); i++) {
+        if (mount(dev, "/wd_probe", "ext4", tries[i].flags, NULL) == 0) {
+            put_fmt("wd probe: mount %s ext4 %s OK", dev, tries[i].what);
+            umount("/wd_probe");
+        } else {
+            put_fmt("wd probe: mount %s ext4 %s failed: %s (errno=%d)",
+                    dev, tries[i].what, strerror(errno), errno);
+        }
     }
     rmdir("/wd_probe");
 }
