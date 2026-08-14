@@ -96,7 +96,11 @@ jobs:
         id: kcache
         uses: actions/cache@v4
         with:
-          path: kernel-virt-android
+          # 설정 요약도 함께 캐시한다. 캐시가 적중하면 빌드 단계가 통째로 스킵되는데,
+          # 그러면 "이 커널이 어떤 설정인지"를 확인할 방법이 사라진다.
+          path: |
+            kernel-virt-android
+            kernel-config.txt
           key: kernel-${{ hashFiles('guest/kernel/build-kernel.sh') }}
 
       - name: Build Android-capable ARM32 kernel for virt
@@ -372,6 +376,9 @@ jobs:
         if: always()
         run: |
           # 조립 단계에서 찍은 사실들. 로그 한가운데라 매번 놓쳐서 여기로 끌어온다.
+          if [ -f kernel-config.txt ]; then
+            echo "########## 커널 설정"; cat kernel-config.txt; echo
+          fi
           if [ -f /tmp/boot/facts.txt ]; then
             echo "########## 게스트가 기대하는 구성"
             cat /tmp/boot/facts.txt
