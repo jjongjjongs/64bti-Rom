@@ -35,7 +35,7 @@
 // 구분할 방법이 이것뿐이다.
 #define WD_PERIOD_MS 5000
 #define WD_MAX_TICKS 90
-#define WD_TABLE_EVERY 4
+#define WD_TABLE_EVERY 12
 #define WD_MAX_PROCS 64
 
 static int g_log = -1;
@@ -265,6 +265,15 @@ static void probe_data_mount(void) {
     if (access(dev, F_OK) != 0) {
         put_fmt("wd probe: %s does not exist", dev);
         return;
+    }
+    // 가장 직접적인 확인. 장치가 쓰기 금지면 O_RDWR open 자체가 EACCES 로 떨어진다.
+    // mount 보다 변수가 적어서, 이 한 줄이 곧 판정이다.
+    int fd = open(dev, O_RDWR | O_CLOEXEC);
+    if (fd >= 0) {
+        put_fmt("wd probe: open(%s, O_RDWR) OK -> device is writable", dev);
+        close(fd);
+    } else {
+        put_fmt("wd probe: open(%s, O_RDWR) failed: %s (errno=%d)", dev, strerror(errno), errno);
     }
     if (mkdir("/wd_probe", 0755) != 0 && errno != EEXIST) {
         put_fmt("wd probe: mkdir failed: %s", strerror(errno));
