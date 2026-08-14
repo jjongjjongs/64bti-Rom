@@ -217,6 +217,10 @@ jobs:
                 echo "=== $f ==="; cat "$WORK/rd/$f"
               fi
             done
+            # 어느 .rc 가 언제 어떤 fstab 을 마운트하는지. /data 가 안 붙는 이유를 찾는 동안
+            # 이걸 계속 추측하고 있었다.
+            echo "=== mount_all / on fs ==="
+            grep -n -E "mount_all|^on fs|^on post-fs|voldmanaged|encryptable" *.rc 2>/dev/null || echo "(없음)"
             echo "=== 이미지 ==="
             for img in system cache userdata; do
               printf '%-12s %s\n' "$img.img" "$(file -b "$WORK/$img.img" | cut -c1-70)"
