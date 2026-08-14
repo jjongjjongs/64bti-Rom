@@ -400,6 +400,12 @@ jobs:
               | grep -avE "not defined in policy|Class .* not defined|avc:  denied" \
               | sed 's/^\[[0-9. ]*\] //' | awk '!seen[$0]++' | head -40
 
+            # 죽는 서비스가 스스로 남긴 말. 위 필터는 head 로 잘려서 여기까지 못 온다.
+            echo "  --- 죽은 서비스가 남긴 말 ---"
+            grep -aE "servicemanager|binder:|Binder|context manager|Terminating|exited with status|killed by signal|SELinux: Failed" "$f" \
+              | grep -avE "init\.wrapper: wd |Starting service" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!s[$0]++' | tail -18
+
             echo "  --- 감시자 마지막 상태 ---"
             grep -a "init\.wrapper: wd t=.* mnt:" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!m[$0]++' | tail -2
             grep -a "init\.wrapper: wd t=.* p1 init" "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!q[$0]++' | tail -1
