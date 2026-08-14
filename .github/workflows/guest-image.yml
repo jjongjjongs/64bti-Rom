@@ -234,11 +234,18 @@ jobs:
           done
 
           # 게스트가 어떤 장치를 기대하는지 직접 확인한다. 추측할 필요가 없다.
-          for f in fstab.ranchu fstab.goldfish; do
-            if [ -f "$WORK/rd/$f" ]; then
-              echo "=== $f ==="; cat "$WORK/rd/$f"
-            fi
-          done
+          mkdir -p /tmp/boot
+          {
+            for f in fstab.ranchu fstab.goldfish; do
+              if [ -f "$WORK/rd/$f" ]; then
+                echo "=== $f ==="; cat "$WORK/rd/$f"
+              fi
+            done
+            echo "=== 이미지 ==="
+            for img in system cache userdata; do
+              printf '%-12s %s\n' "$img.img" "$(file -b "$WORK/$img.img" | cut -c1-70)"
+            done
+          } | tee /tmp/boot/facts.txt
 
           # 여기서 zip 으로 묶지 않는다. upload-artifact 가 어차피 zip 으로 감싸므로,
           # 미리 묶으면 zip 안에 zip 이 들어가 임포터가 kernel 을 찾지 못한다.
@@ -355,6 +362,12 @@ jobs:
       - name: Verdict
         if: always()
         run: |
+          # 조립 단계에서 찍은 사실들. 로그 한가운데라 매번 놓쳐서 여기로 끌어온다.
+          if [ -f /tmp/boot/facts.txt ]; then
+            echo "########## 게스트가 기대하는 구성"
+            cat /tmp/boot/facts.txt
+            echo
+          fi
           for f in /tmp/boot/serial-*.log; do
             [ -f "$f" ] || continue
             label=$(basename "$f" .log | sed 's/^serial-//')
