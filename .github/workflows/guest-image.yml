@@ -182,12 +182,26 @@ jobs:
             size=$(stat -c%s "$serial" 2>/dev/null || echo 0)
             {
               echo "## [$label] 시리얼 출력: ${size} bytes"
-              echo '```'
-              if [ "$size" -gt 0 ]; then head -c 16000 "$serial"; else echo "(무음)"; fi
-              echo '```'
+              if [ "$size" -gt 0 ]; then
+                # 결정적인 줄들만 먼저. init.wrapper 와 vport 는 부팅 끝에 나오므로
+                # head 로 자르면 정작 필요한 부분이 잘려 나간다.
+                echo "### 핵심 줄"
+                echo '```'
+                grep -aE "init\.wrapper|vport|virtio.console|virtio_console|Kernel panic|Freeing initrd|Run /|Unable to mount|No filesystem|end Kernel" \
+                  "$serial" | sort -u | head -40 || echo "(해당 없음)"
+                echo '```'
+                echo "### 마지막 6000 bytes"
+                echo '```'
+                tail -c 6000 "$serial"
+                echo '```'
+              else
+                echo '```'
+                echo "(무음)"
+                echo '```'
+              fi
               echo "QEMU 자체 출력:"
               echo '```'
-              head -c 2000 "$stdout" || true
+              head -c 1500 "$stdout" || true
               echo '```'
             } | tee -a "$GITHUB_STEP_SUMMARY"
           }
