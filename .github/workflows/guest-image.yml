@@ -108,6 +108,7 @@ jobs:
             --set-str ANDROID_BINDER_DEVICES "binder,hwbinder,vndbinder" \
             --enable ASHMEM \
             --enable POWER_SUPPLY --enable TEST_POWER \
+            --enable PM_WAKELOCKS --enable PM_SLEEP --enable SUSPEND \
             --enable VIRTIO --enable VIRTIO_MMIO --enable VIRTIO_BLK \
             --enable VIRTIO_CONSOLE --enable VIRTIO_NET \
             --enable SERIAL_AMBA_PL011 --enable SERIAL_AMBA_PL011_CONSOLE \
@@ -174,15 +175,15 @@ jobs:
           cp "$GITHUB_WORKSPACE/init.wrapper" ./init.wrapper
           chmod 750 ./init.wrapper
 
-          # healthd 는 goldfish 배터리를 읽는데 -machine virt 에는 없어서 abort 한다.
-          # critical 이라 4번 죽으면 init 이 recovery 로 재부팅해 그 뒤를 볼 수 없다.
-          # 플래그만 떼어내 부팅이 계속되게 한다. healthd 자체 오류는 logcat 으로 가서
-          # 시리얼에 안 보이므로, 이렇게 해야 다음 단계가 드러난다.
+          # healthd 는 -machine virt 에서 abort 한다(TEST_POWER 를 넣어도 여전하므로
+          # 전원 장치 부재가 원인은 아니다). critical 만 떼었더니 무한 재시작하며
+          # 로그를 도배해 정작 그 뒤가 보이지 않았다. 배터리 UI 라 게임 구동에는
+          # 필요 없으므로 서비스 자체를 끈다.
           if [ -f init.rc ]; then
             awk '
               /^service[ \t]+healthd/ { inblk=1 }
-              inblk && /^[ \t]*critical[ \t]*$/ { print "# critical (removed: no battery device on -machine virt)"; next }
               /^service[ \t]/ && !/healthd/ { inblk=0 }
+              inblk { print "# [disabled] " $0; next }
               { print }
             ' init.rc > init.rc.new && mv init.rc.new init.rc
             echo "init.rc healthd 블록:"; awk '/^service[ \t]+healthd/,/^$/' init.rc | head -10
@@ -227,7 +228,7 @@ jobs:
       - name: Smoke boot the guest under QEMU
         continue-on-error: true
         env:
-          BOOT_SECONDS: "120"
+          BOOT_SECONDS: "330"
         run: |
           sudo apt-get install -y -qq qemu-system-arm
           WORK="$GITHUB_WORKSPACE/guest-out"
@@ -290,16 +291,8 @@ jobs:
           # 1) 실제로 패키징되는 커널 (직접 빌드한 virt 용, 없으면 SDK 폴백)
           boot_with packaged "$WORK/kernel"
 
-          # 2) 검증된 대조군: Debian armhf 넷부트 커널. multi_v7 기반이라 QEMU virt 를
-          #    지원하고 PL011 · virtio-mmio · virtio-console 이 들어 있다. 안드로이드는
-          #    binder 가 없어 못 뜨지만, /init.wrapper 가 vport 개수를 찍어주면
-          #    "가상 하드웨어 + 램디스크 + 래퍼" 배관이 멀쩡하다는 게 증명된다.
-          if curl -fsSL -o "$BOOT/vmlinuz-debian" \
-               https://deb.debian.org/debian/dists/stable/main/installer-armhf/current/images/netboot/vmlinuz; then
-            boot_with debian-armmp "$BOOT/vmlinuz-debian"
-          else
-            echo "Debian 대조군 커널을 받지 못했습니다" | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
+          # Debian 대조군은 "virt + 램디스크 + init.wrapper 배관은 정상, 문제는 커널"을
+          # 증명하는 역할을 이미 다했다. 이제는 시간만 잡아먹으므로 뺀다.
 
       - uses: actions/upload-artifact@v4
         if: always()
