@@ -186,7 +186,7 @@ Limbo 계열 prebuilt(glib 2.56.1 / pixman 0.40.0 / SDL 2.0.8 / compat-*)는 현
 - [x] `./gradlew :app:assembleDebug` 실제 통과 확인 (CI, APK 아티팩트 생성)
 - [ ] **게스트 이미지 제작** (kernel + ramdisk/init.wrapper) — 최우선, docs/GUEST-IMAGE.md 참고
 - [ ] `/dev/qemu_pipe` → virtio-serial 다중화 방식 결정 (docs/GUEST-IMAGE.md 4.2)
-- [ ] virtio 버스 통일 여부 결정: PCI 유지 vs MMIO 전환 (docs/GUEST-IMAGE.md 3.2)
+- [x] virtio 버스를 MMIO로 통일 (게스트 커널에 PCI 불필요)
 - [ ] 게스트 부팅 성공 후: APK를 게스트로 넘기는 통로 구현
 - [ ] QEMU 11.0.2 서브모듈 추가 및 NDK r27로 재빌드
 - [ ] `libpodroid-launcher.so` 재작성 (가장 쉬움)

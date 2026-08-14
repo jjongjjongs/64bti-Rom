@@ -390,13 +390,20 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         command.add("-display");
         command.add("none");
         command.add("-device");
-        command.add("virtio-gpu-pci,xres=480,yres=800");
+        command.add("virtio-gpu-device,xres=480,yres=800");
         File transportDir = new File(vmRootPath, "transport");
         if (!transportDir.exists()) {
             transportDir.mkdirs();
         }
+        // virtio-mmio throughout, matching the virtio-blk-device disks below. The guest kernel
+        // then needs only CONFIG_VIRTIO_MMIO and no PCIe host bridge — goldfish/ranchu derived
+        // ARM kernels are commonly built mmio-only, and on those a -pci transport would leave
+        // /dev/vport0p* missing, which silently kills the emugl channel even when the guest boots.
+        //
+        // disable-legacy is deliberately absent: it is a virtio-pci property and QEMU rejects it
+        // outright on the mmio device ("Property 'virtio-serial-device.disable-legacy' not found").
         command.add("-device");
-        command.add("virtio-serial-pci,disable-legacy=on");
+        command.add("virtio-serial-device");
         for (int pipeIndex = 0; pipeIndex < TRANSPORT_PIPE_COUNT; pipeIndex++) {
             File pipeSocket = new File(transportDir, "pipe" + pipeIndex + ".sock");
             if (pipeSocket.exists()) {

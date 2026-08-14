@@ -91,8 +91,7 @@ CONFIG_VIRTIO=y
 CONFIG_VIRTIO_MMIO=y            # virtio-blk-device (디스크)
 CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_CONSOLE=y         # virtio-serial = emugl 전송로
-CONFIG_PCI=y                    # ↓ 아래 3.2 반드시 읽을 것
-CONFIG_PCI_HOST_GENERIC=y
+# PCI는 필요 없습니다 (3.2 참고 — 호스트를 MMIO로 통일했습니다)
 CONFIG_ANDROID_BINDER_IPC=y     # cmdline의 binder.devices=
 CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"
 CONFIG_SERIAL_AMBA_PL011=y      # cmdline의 console=ttyAMA0
@@ -100,33 +99,35 @@ CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
 CONFIG_BLK_DEV_INITRD=y         # rdinit=
 ```
 
-### 3.2 ⚠ PCI vs MMIO — 여기서 막히기 쉽습니다
+### 3.2 virtio 버스: MMIO로 통일했습니다
 
-현재 호스트 코드는 **버스를 섞어서** 씁니다:
+이전 판에서는 호스트가 버스를 섞어 쓰고 있었습니다 — 디스크는 virtio-mmio
+(`virtio-blk-device`)인데 emugl 전송로와 GPU는 PCI(`virtio-serial-pci`,
+`virtio-gpu-pci`)였습니다.
 
-| 디바이스 | 버스 |
-|---|---|
-| `virtio-blk-device` (system/userdata/cache) | **virtio-MMIO** |
-| `virtio-serial-pci` (emugl 파이프 8개) | **PCI** |
-| `virtio-gpu-pci` | **PCI** |
+goldfish/ranchu 계열 ARM 커널은 보통 **virtio-mmio 전용**으로 빌드되어 PCIe 호스트
+브리지가 꺼져 있습니다. 그 상태에서는 디스크는 붙지만 **virtio-serial이 보이지
+않아** `/dev/vport0p*`가 생기지 않고, 그러면 부팅에 성공하더라도 emugl 전송로가
+없어 화면이 영원히 나오지 않습니다.
 
-문제는 goldfish/ranchu 계열 ARM 커널이 보통 **virtio-mmio 전용**으로 빌드되어
-PCIe 호스트 브리지가 꺼져 있다는 점입니다. 그러면:
+**그래서 호스트를 전부 MMIO로 통일했습니다.** 이제 커널에 PCI가 필요 없습니다.
 
-- 디스크는 붙습니다 (MMIO)
-- **virtio-serial이 안 보입니다 → `/dev/vport0p*`가 안 생김 → emugl 전송로 없음
-  → 부팅이 되더라도 화면은 영원히 안 나옵니다**
+| 디바이스 | 변경 전 | 변경 후 |
+|---|---|---|
+| 디스크 | `virtio-blk-device` | 그대로 (원래 MMIO) |
+| emugl 파이프 | `virtio-serial-pci,disable-legacy=on` | **`virtio-serial-device`** |
+| GPU | `virtio-gpu-pci,xres=,yres=` | **`virtio-gpu-device,xres=,yres=`** |
 
-해결은 둘 중 하나입니다.
+> `disable-legacy`는 **virtio-pci 전용 속성**이라 그대로 옮기면 QEMU가 기동조차
+> 하지 못합니다 (`Property 'virtio-serial-device.disable-legacy' not found`).
+> 그래서 제거했습니다. virt 머신의 virtio-mmio는 기본이 virtio 1.0이라 의미상
+> 잃는 것도 없습니다. `xres`/`yres`는 MMIO에서도 그대로 동작합니다.
+>
+> 위 조합은 QEMU 8.2.2에서 실제로 검증했습니다 — 정상 기동하고 포트 8개가 모두
+> MMIO virtio-serial 컨트롤러에 붙습니다.
 
-**(a) 커널에 PCI를 켠다** — 위 config대로. 커널을 직접 빌드한다면 이쪽이 간단합니다.
-
-**(b) 호스트 코드를 MMIO로 통일한다** — `GuestRunActivity.buildModernQemuCommand()`에서
-`virtio-serial-pci` → `virtio-serial-device`, `virtio-gpu-pci` → `virtio-gpu-device`로
-바꿉니다. 기성 커널을 쓸 거라면 이쪽이 안전합니다.
-
-> 어느 쪽이든, **부팅 후 `/dev/vport0p0`가 실제로 생겼는지 반드시 확인**하세요.
-> 이게 없으면 그래픽은 시작도 못 합니다.
+여전히 **부팅 후 `/dev/vport0p0` 존재 여부가 최대 관문**입니다(7절 4번). 다만 이제
+원인이 PCI 부재가 아니라 `CONFIG_VIRTIO_CONSOLE` 누락 쪽입니다.
 
 ### 3.3 커널 소스
 
@@ -140,8 +141,9 @@ git clone https://android.googlesource.com/kernel/common -b android11-5.4
 
 SDK의 `kernel-ranchu`를 먼저 시도해볼 가치는 있습니다. ranchu 보드 자체가 QEMU
 `virt`를 바탕으로 만들어졌기 때문에 PL011 콘솔·virtio-mmio는 맞을 가능성이 높습니다.
-다만 3.2의 PCI 문제는 거의 확실히 걸립니다. **먼저 SDK 커널로 6절 스모크 테스트를
-돌려보고, `/dev/vport0p0` 유무로 판단하는 게 가장 빠릅니다.**
+MMIO로 통일했으므로 PCI 문제는 사라졌고, 남은 관건은 `CONFIG_VIRTIO_CONSOLE`
+포함 여부입니다. **먼저 SDK 커널로 6절 스모크 테스트를 돌려보고,
+`/dev/vport0p0` 유무로 판단하는 게 가장 빠릅니다.**
 
 ---
 
@@ -241,8 +243,8 @@ ARGS=(
   -accel tcg,thread=multi,tb-size=256
   -smp 2 -m 1024
   -display none
-  -device virtio-gpu-pci,xres=480,yres=800
-  -device virtio-serial-pci,disable-legacy=on
+  -device virtio-gpu-device,xres=480,yres=800
+  -device virtio-serial-device
 )
 for i in 0 1 2 3 4 5 6 7; do
   ARGS+=(-chardev "socket,id=singlevmpipe$i,path=/tmp/guest/transport/pipe$i.sock,server=on,wait=off")
@@ -285,7 +287,8 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 7 | zygote 기동 | `Zygote: Process ... starting` |
 | 8 | emugl 연결 | 호스트 `libemugl_probe.so`에 `pipe:opengles` 도달 |
 
-**4번이 진짜 관문입니다.** 여기서 막히면 3.2의 PCI/MMIO 문제입니다.
+**4번이 진짜 관문입니다.** 여기서 막히면 커널의 `CONFIG_VIRTIO_CONSOLE`을
+확인하세요 (호스트 쪽 버스 문제는 MMIO 통일로 해결됐습니다).
 
 TCG 소프트웨어 에뮬레이션이라 PC에서도 부팅에 수 분 걸립니다. 폰은 더 느립니다.
 `-serial stdio`라 로그가 그대로 보이니 인내심 있게 지켜보세요.
