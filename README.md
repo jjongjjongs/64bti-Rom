@@ -97,7 +97,7 @@ SDL 보일러플레이트의 deprecation과 `PackageInfo.versionCode` 레거시 
 | `libsinglevm_runtime.so` | `MainActivity.nativeProbeRuntime`, `GuestRunActivity.nativeStartGuest` / `nativeRunFrame` / `nativeAttachSurface` / `nativeDetachSurface` | 자바 선언과 **일치**. 레거시 엔진 경로에서 사용 중 |
 | `libemugl_probe.so` | `GuestRunActivity.nativeProbeEmugl` / `nativeAttachEmuglSurface` / `nativeDetachEmuglSurface` / `nativeStartEmuglBridge` | 자바 선언과 **일치**. Android7 엔진 경로에서 사용 중 |
 | `libsinglevm_qemu.so` | `GuestRunActivity.nativeBuildQemuArgs` / `nativeQemuProbe` / `nativeStartAndroid7Guest` | ⚠️ **자바 쪽에 대응 선언이 없음 — 죽은 바이너리** |
-| `libemugl_host_android.so` | (JNI export 없음) | `libemugl_probe.so`가 dlopen하는 것으로 추정 |
+| `libemugl_host_android.so` | (JNI export 없음) | `libemugl_probe.so`가 **dlopen으로 로드** (확인됨: probe가 `dlopen`/`dlsym`을 import하고 emugl 심볼을 정적으로 참조하지 않음) |
 
 **`libsinglevm_qemu.so`가 죽은 이유**: 자바 코드가 JNI로 QEMU를 띄우던 방식에서
 `ProcessBuilder`로 QEMU 실행파일을 exec하는 방식(`buildModernQemuCommand` +
@@ -113,6 +113,10 @@ SDL 보일러플레이트의 deprecation과 `PackageInfo.versionCode` 레거시 
 - 매니페스트에 `SDLActivity`가 등록되어 있지 않습니다.
 - `libSDL2.so`를 `NEEDED`로 잡는 것은 `libcompat-SDL2-ext.so` 하나뿐이고, 그것도
   현재 실행 경로에서 로드되지 않습니다.
+- `dlopen`을 쓰는 라이브러리들(`libemugl_probe`, `libemugl_host_android`,
+  `libsinglevm_runtime`, `libsinglevm_qemu`, `libqemu-system-aarch64`) 중
+  **`libSDL2.so`를 이름으로 여는 곳은 없습니다** — 해당 문자열을 가진 것은
+  `libSDL2.so` 자신뿐입니다. 따라서 제거는 링크·로딩상 안전합니다.
 - 게다가 Java 글루(`nativeSetupJNI` 존재 → SDL 2.0.10+)와 `libSDL2.so`(hg-11914 →
   2.0.8 계열)의 **버전이 서로 어긋납니다.**
 
