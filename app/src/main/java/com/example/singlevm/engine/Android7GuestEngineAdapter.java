@@ -11,7 +11,40 @@ public final class Android7GuestEngineAdapter implements EngineAdapter {
     public static final String CORE_LIBRARY_NAME = "libqemu-system-aarch64.so";
     public static final String ID = "android7-qemu";
     public static final String IMAGE_DIRECTORY = "android7";
-    public static final String[] REQUIRED_IMAGES = {"kernel", "ramdisk.img", "system.img"};
+    public static final String SYSTEM_IMAGE = "system.img";
+
+    /**
+     * Accepted kernel filenames, most specific first. GuestRunActivity boots whichever of these
+     * exists, so the readiness check has to accept the same set — previously it demanded a file
+     * literally named "kernel" while the boot path preferred "kernel-android54", meaning an
+     * android54-only image set was bootable but reported as "준비 필요".
+     */
+    public static final String[] KERNEL_CANDIDATES = {"kernel-android54", "kernel-virt", "kernel"};
+
+    /** Accepted ramdisk filenames, most specific first. Same reasoning as KERNEL_CANDIDATES. */
+    public static final String[] RAMDISK_CANDIDATES = {"ramdisk-android54.img", "ramdisk.img"};
+
+    /**
+     * Picks the image the guest will actually boot with. Returns the last candidate when none
+     * exist, so callers get a sensible path to report as missing.
+     */
+    private static File selectImage(File imageDir, String[] candidates) {
+        for (String name : candidates) {
+            File candidate = new File(imageDir, name);
+            if (candidate.isFile() && candidate.length() > 0) {
+                return candidate;
+            }
+        }
+        return new File(imageDir, candidates[candidates.length - 1]);
+    }
+
+    public static File selectKernel(File imageDir) {
+        return selectImage(imageDir, KERNEL_CANDIDATES);
+    }
+
+    public static File selectRamdisk(File imageDir) {
+        return selectImage(imageDir, RAMDISK_CANDIDATES);
+    }
 
     @Override // com.example.singlevm.engine.EngineAdapter
     public String id() {
@@ -30,21 +63,18 @@ public final class Android7GuestEngineAdapter implements EngineAdapter {
         List<String> missing = new ArrayList<>();
         StringBuilder details = new StringBuilder();
         details.append("이미지 폴더: ").append(imageDir.getAbsolutePath()).append('\n');
-        String[] strArr = REQUIRED_IMAGES;
-        int length = strArr.length;
-        int i = 0;
-        while (true) {
-            if (i >= length) {
-                break;
-            }
-            String name = strArr[i];
-            File image = new File(imageDir, name);
+        File[] required = {
+                selectKernel(imageDir),
+                selectRamdisk(imageDir),
+                new File(imageDir, SYSTEM_IMAGE),
+        };
+        for (File image : required) {
             boolean present = image.isFile() && image.length() > 0;
-            details.append("- ").append(name).append(": ").append(present ? humanSize(image.length()) : "없음").append('\n');
+            details.append("- ").append(image.getName()).append(": ")
+                    .append(present ? humanSize(image.length()) : "없음").append('\n');
             if (!present) {
-                missing.add(name);
+                missing.add(image.getName());
             }
-            i++;
         }
         File userdata = new File(imageDir, "userdata.img");
         details.append("- userdata.img: ").append((!userdata.isFile() || userdata.length() <= 0) ? "없음 (첫 부팅 시 생성 예정)" : humanSize(userdata.length())).append('\n');

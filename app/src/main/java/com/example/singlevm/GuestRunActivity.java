@@ -346,8 +346,6 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     }
 
     private List<String> buildModernQemuCommand(String corePath, String vmRootPath) {
-        File selectedKernel;
-        File selectedRamdisk;
         File imageRoot = new File(vmRootPath, Android7GuestEngineAdapter.IMAGE_DIRECTORY);
         File nativeDir = new File(getApplicationInfo().nativeLibraryDir);
         File launcher = new File(nativeDir, "libpodroid-launcher.so");
@@ -356,23 +354,16 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
             command.add(launcher.getAbsolutePath());
         }
         command.add(corePath);
-        File android54Kernel = new File(imageRoot, "kernel-android54");
-        File virtKernel = new File(imageRoot, "kernel-virt");
-        if (android54Kernel.isFile()) {
-            selectedKernel = android54Kernel;
-        } else {
-            selectedKernel = virtKernel.isFile() ? virtKernel : new File(imageRoot, "kernel");
-        }
-        File android54Ramdisk = new File(imageRoot, "ramdisk-android54.img");
-        if (android54Ramdisk.isFile()) {
-            selectedRamdisk = android54Ramdisk;
-        } else {
-            selectedRamdisk = new File(imageRoot, "ramdisk.img");
-        }
+        // Selection lives in the engine adapter so the readiness check and the boot path can
+        // never disagree about which kernel/ramdisk names are acceptable.
+        File selectedKernel = Android7GuestEngineAdapter.selectKernel(imageRoot);
+        File selectedRamdisk = Android7GuestEngineAdapter.selectRamdisk(imageRoot);
         command.add("-machine");
         command.add("virt,gic-version=3");
         command.add("-cpu");
-        command.add(selectedKernel.equals(new File(imageRoot, "kernel")) ? "cortex-a15" : "cortex-a53");
+        // A plain "kernel" is the legacy ARM32 (ranchu/goldfish) image; the android54 and virt
+        // kernels are the newer 64-bit-capable ones.
+        command.add("kernel".equals(selectedKernel.getName()) ? "cortex-a15" : "cortex-a53");
         command.add("-accel");
         command.add("tcg,thread=multi,tb-size=256");
         command.add("-smp");
