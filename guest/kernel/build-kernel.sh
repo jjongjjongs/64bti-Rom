@@ -71,6 +71,12 @@ make -s multi_v7_defconfig
 #
 # SCHED_TUNE 은 여기 없다. 5.10 에서 제거됐고(uclamp 로 대체) --enable 해봐야 조용히
 # 무시된다. init 이 /sys/fs/cgroup/stune 쓰기에 실패하며 로그를 남기지만 치명적이지 않다.
+#
+# netfilter 를 켜는 이유: netd 가 부팅할 때마다
+#   "iptables v1.4.20: can't initialize iptables table `filter': Table does not exist"
+# 로 방화벽 규칙 설치에 전부 실패한다. multi_v7_defconfig 에는 iptables 테이블이 없다.
+# netd 자체는 죽지 않지만 system_server 의 ConnectivityService 가 netd 를 기다리므로
+# 부팅이 여기서 늘어질 수 있다. MODULES 를 껐으므로 전부 내장이어야 한다.
 ./scripts/config \
   --enable SECURITY --enable SECURITY_SELINUX --enable SECURITY_SELINUX_BOOTPARAM \
   --enable SECURITY_NETWORK --enable AUDIT \
@@ -93,6 +99,17 @@ make -s multi_v7_defconfig
   --enable CGROUP_CPUACCT --enable MEMCG --enable CGROUP_FREEZER \
   --enable CGROUP_DEVICE --enable CPUSETS \
   --enable KALLSYMS --enable KALLSYMS_ALL \
+  --enable NETFILTER --enable NETFILTER_ADVANCED --enable NETFILTER_XTABLES \
+  --enable NF_CONNTRACK --enable NF_NAT \
+  --enable IP_NF_IPTABLES --enable IP_NF_FILTER --enable IP_NF_TARGET_REJECT \
+  --enable IP_NF_MANGLE --enable IP_NF_RAW --enable IP_NF_NAT \
+  --enable IP_NF_TARGET_MASQUERADE \
+  --enable IP6_NF_IPTABLES --enable IP6_NF_FILTER --enable IP6_NF_TARGET_REJECT \
+  --enable IP6_NF_MANGLE --enable IP6_NF_RAW \
+  --enable NETFILTER_XT_MARK --enable NETFILTER_XT_MATCH_STATE \
+  --enable NETFILTER_XT_MATCH_OWNER --enable NETFILTER_XT_MATCH_QUOTA \
+  --enable NETFILTER_XT_MATCH_CONNMARK --enable NETFILTER_XT_TARGET_CONNMARK \
+  --enable NETFILTER_XT_TARGET_IDLETIMER \
   --disable MODULES
 make -s olddefconfig
 
@@ -101,7 +118,8 @@ make -s olddefconfig
 # "지금 쓰는 커널이 어떤 설정으로 빌드됐는지"를 볼 방법이 이것뿐이다.
 for opt in CONFIG_VIRTIO_CONSOLE CONFIG_SECURITY_SELINUX CONFIG_ANDROID_BINDER_IPC \
            CONFIG_ANDROID_BINDERFS CONFIG_ANDROID_BINDER_DEVICES \
-           CONFIG_ASHMEM CONFIG_LSM CONFIG_KALLSYMS; do
+           CONFIG_ASHMEM CONFIG_LSM CONFIG_KALLSYMS \
+           CONFIG_IP_NF_FILTER CONFIG_IP6_NF_FILTER; do
   printf '%-34s %s\n' "$opt" "$(grep -E "^$opt=" .config || echo '(설정 안 됨)')"
 done | tee "$(dirname "$OUT")/kernel-config.txt"
 
