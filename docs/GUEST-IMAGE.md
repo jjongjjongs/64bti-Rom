@@ -10,7 +10,18 @@
 
 ---
 
+> **현황 (이 문서에서 가장 먼저 볼 곳): 7절.**
+> 게스트는 부팅해서 `/system` `/cache` `/data` 를 마운트하고 zygote 와 system_server 까지
+> 올라옵니다. 지금 막혀 있는 곳은 SurfaceFlinger 하나이고, 원인은 goldfish pipe 전송로
+> 부재로 보입니다(7.3). CI 가 매 커밋마다 이미지를 조립하고 스모크 부팅까지 돌립니다.
+
 ## 0. 대원칙: 폰이 아니라 PC에서 먼저 잡는다
+
+> ⚠ **이 절은 더 이상 유효하지 않습니다.** PC 를 쓸 수 없는 상황이라, 여기 적힌 작업은
+> 전부 `.github/workflows/guest-image.yml` 이 GitHub 러너에서 대신합니다. 커널 빌드는
+> 캐시되고(스크립트가 안 바뀌면 재사용), 조립·스모크 부팅·판정까지 한 번에 돕니다.
+> 결과 아티팩트를 폰에서 내려받아 앱의 "Android 7 구성 가져오기" 로 넣으면 됩니다.
+
 
 **이게 이 문서에서 제일 중요한 항목입니다.**
 
@@ -322,26 +333,124 @@ qemu-system-aarch64 "${ARGS[@]}"
 
 ---
 
-## 7. 단계별 성공 판정
+## 7. 단계별 성공 판정 — 실측 현황
 
-한 번에 다 되기를 기대하지 말고, 아래 순서로 하나씩 통과시키세요.
+아래 표는 계획이 아니라 **CI(`.github/workflows/guest-image.yml`)에서 실제로 확인한
+결과**입니다. 각 관문에서 걸렸던 원인과 그 근거가 된 로그 한 줄을 같이 적어둡니다.
+같은 자리에서 다시 막혔을 때 추측을 반복하지 않기 위한 기록입니다.
 
-| # | 목표 | 성공 신호 |
-|---|---|---|
-| 1 | 커널이 뜬다 | 시리얼에 `Booting Linux on physical CPU` |
-| 2 | 램디스크를 잡는다 | `Unpacking initramfs` 후 패닉 없음 |
-| 3 | `/init.wrapper`가 돈다 | 래퍼가 찍는 로그 (직접 넣으세요) |
-| 4 | **virtio-serial이 보인다** | `/dev/vport0p0` 존재 ← 3.2 관문 |
-| 5 | `/init`이 넘겨받는다 | Android init 로그, `init: init first stage started` |
-| 6 | system.img 마운트 | `/system` 마운트 성공 |
-| 7 | zygote 기동 | `Zygote: Process ... starting` |
-| 8 | emugl 연결 | 호스트 `libemugl_probe.so`에 `pipe:opengles` 도달 |
+| # | 목표 | 상태 | 걸렸던 원인 |
+|---|---|---|---|
+| 1 | 커널이 뜬다 | ✅ | SDK `kernel-ranchu` 는 goldfish 보드용이라 `-machine virt` 에서 무음으로 죽음 → 직접 빌드 |
+| 2 | 램디스크를 잡는다 | ✅ | |
+| 3 | `/init.wrapper` 가 돈다 | ✅ | |
+| 4 | virtio-serial 이 보인다 | ✅ | `/dev/vport0p0` 은 영영 안 생김 — 포트 0 은 콘솔 예약. 실제로는 `vport3p1..p8` |
+| 5 | `/init` 이 넘겨받는다 | ✅ | `CONFIG_LSM` 에 selinux 가 없으면 selinuxfs 미등록 → 정책 로드 실패 |
+| 6 | `/system` `/cache` `/data` 마운트 | ✅ | **장치 순서** (아래 7.1) |
+| 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
+| 8 | SurfaceFlinger | ❌ | `SurfaceFlinger::init()` 에서 abort — 아래 7.3 |
+| 9 | emugl 연결 | ❌ | 8번에 막혀 도달 못 함 |
 
-**4번이 진짜 관문입니다.** 여기서 막히면 커널의 `CONFIG_VIRTIO_CONSOLE`을
-확인하세요 (호스트 쪽 버스 문제는 MMIO 통일로 해결됐습니다).
+### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
 
-TCG 소프트웨어 에뮬레이션이라 PC에서도 부팅에 수 분 걸립니다. 폰은 더 느립니다.
-`-serial stdio`라 로그가 그대로 보이니 인내심 있게 지켜보세요.
+`-drive` 를 system → cache → userdata 순으로 적었는데 게스트는
+`vda=userdata(2G)`, `vdb=cache(256M)`, `vdc=system(1.75G)` 로 봤습니다. 바깥 둘이
+뒤집힙니다. 결과:
+
+- `/system` 이 **빈 userdata 를 물었습니다.** 빈 ext4 도 `ro` 마운트는 성공하므로
+  로그상으로는 정상으로 보였습니다.
+- `/data` 는 `readonly=on` 으로 붙인 system.img 를 가리켰고, 쓰기 마운트가
+  거부되며 `error: Permission denied`(EACCES) 로 실패했습니다.
+- `/sys/block/vda/ro` 가 1 이었던 것은 fs_mgr 때문입니다. fstab 항목이 `ro` 면
+  fs_mgr 이 그 장치에 `BLKROSET` 을 겁니다.
+
+호스트 QEMU 버전마다 달라질 수 있으므로 **순서를 맞추는 방식은 쓰지 않습니다.**
+`init.wrapper` 가 각 디스크의 ext4 슈퍼블록 라벨(`system` / `cache` / `data`)을 읽어
+`fstab.ranchu` 의 장치 이름을 실제 장치로 고쳐 씁니다. 안드로이드 init 보다 먼저
+도는 시점이라 rootfs 가 아직 쓰기 가능합니다.
+
+> `mkfs.ext4 -L` 로 cache/userdata 에 라벨을 주고, SDK 의 system.img 에는
+> `e2label` 로 지정합니다. 라벨이 없으면 교정이 동작하지 않습니다.
+
+### 7.2 바인더는 두 번 막힙니다
+
+**(a) 장치가 안 생김.** `CONFIG_ANDROID_BINDERFS=y` 면 binderfs 가
+`CONFIG_ANDROID_BINDER_DEVICES` 의 이름을 가져가서 마운트된 binderfs 안에만 장치를
+만듭니다. legacy misc 장치가 등록되지 않아 `/dev/binder` 가 없습니다.
+
+판별법 — misc 클래스에 ashmem 은 있는데 binder 가 없고, `/proc/filesystems` 에는
+binder 가 있음:
+
+```
+wd dev: /sys/class/misc/binder MISSING
+wd dev: binderfs in /proc/filesystems: yes
+wd dev: misc class: vga_arbiter hw_random autofs rfkill cpu_dma_latency ashmem ...
+```
+
+Android 7 은 binderfs 를 모르고 `/dev/binder` 를 직접 엽니다. → **BINDERFS 를 끕니다.**
+
+**(b) ABI 가 안 맞음.** 장치가 생긴 뒤에도 이렇게 죽습니다:
+
+```
+E ProcessState: Binder driver protocol does not match user space protocol!
+F ProcessState: Binder driver could not be opened.  Terminating.
+init: critical process 'servicemanager' exited 4 times in 4 minutes; rebooting into recovery mode
+```
+
+API 24 armeabi-v7a 유저스페이스는 옛 **32비트 바인더 API(프로토콜 7**, 바인더 구조체
+안 포인터가 32비트)로 빌드돼 있습니다. `BINDER_IPC_32BIT` 는 이후 커널에서 삭제돼
+5.10 은 프로토콜 8 + 64비트 포인터만 제공합니다.
+
+드라이버가 전부 `binder_uintptr_t` / `binder_size_t` 타입으로 쓰여 있으므로,
+`include/uapi/linux/android/binder.h` 의 타입 정의 두 줄과 버전 상수 한 줄을 되돌리면
+드라이버 전체가 32비트 ABI 로 컴파일됩니다. `guest/kernel/build-kernel.sh` 가 이
+치환을 하고, **치환이 안 먹으면 빌드를 실패시킵니다** — 조용히 잘못된 ABI 의 커널을
+만드는 것이 가장 나쁩니다.
+
+### 7.3 지금 막혀 있는 곳: SurfaceFlinger
+
+```
+F DEBUG: pid: 4665, name: surfaceflinger >>> /system/bin/surfaceflinger <<<
+F DEBUG:   #06 pc 00025e4d /system/lib/libsurfaceflinger.so (_ZN7android14SurfaceFlinger4initEv+280)
+init: Service 'surfaceflinger' killed by signal 6
+```
+
+Android 7 의 init.rc 는 surfaceflinger 에 `onrestart restart zygote` 를 걸어둡니다.
+그래서 SF 가 죽을 때마다 zygote 와 그 의존 서비스가 통째로 재시작되고, 부팅이
+영원히 같은 자리를 맴돕니다(PID 가 10000 을 넘고, zygote 는 895초 시점에도 아직
+"Preloading classes" 였습니다). **부팅이 느린 것이 아니라 계속 처음부터 다시 하는
+것**이라는 점을 착각하기 쉽습니다.
+
+`SurfaceFlinger::init()` 은 EGL/gralloc 설정 실패에 `LOG_ALWAYS_FATAL` 을 겁니다.
+ranchu 그래픽 HAL 은 `/dev/qemu_pipe` 로 호스트 렌더러에 붙는데, 이 게스트에는 goldfish
+pipe 드라이버도 장치도 없습니다 — 4.2 에서 미룬 바로 그 전송로입니다.
+
+### 7.4 치명적이지 않은 잡음 (무시해도 됨)
+
+부팅 로그에 계속 나오지만 진행을 막지 않는 것들입니다. 여기에 시간을 쓰지 마세요.
+
+- `cgroup: Unknown subsys name 'schedtune'` — `SCHED_TUNE` 은 5.10 에서 uclamp 로
+  대체되며 삭제됐습니다. `--enable` 해도 조용히 무시됩니다.
+- `memtrack` / `radio.primary` / `sound_trigger.primary` / `audio.primary` 로드 실패
+  — 해당 HAL 이 이미지에 없습니다.
+- `avc: denied ... permissive=1` — permissive 라 차단이 아니라 기록만 된 것입니다.
+- `Permission ... not defined in policy` — 5.10 이 정의하는 권한을 Android 7 정책이
+  모를 뿐입니다.
+
+### 7.5 진단 도구
+
+추측을 반복하지 않기 위해 게스트 안에 넣어둔 것들입니다.
+
+- **감시자(watchdog)**: `init.wrapper` 가 `/init` 으로 exec 하기 직전 fork 해서 남기는
+  프로세스. exec 전에 열어둔 `/dev/kmsg` fd 를 그대로 들고 있어(안드로이드 init 이
+  `/dev` 에 tmpfs 를 새로 덮어도 이미 열린 fd 는 유효합니다) 5초마다 마운트 상태,
+  블록 장치, PID 1 의 wchan/syscall, 그래픽·바인더 장치 유무를 찍습니다.
+  **콘솔이 조용해졌을 때 "멈춘 것"과 "로그를 안 내는 것"을 구분할 방법이 이것뿐입니다.**
+- **`printk.devkmsg=on`**: 커널은 유저스페이스의 `/dev/kmsg` 쓰기를 기본값으로 속도
+  제한합니다. init 과 fs_mgr 이 바로 이 경로로 로그를 냅니다. 이걸 켜기 전까지
+  fs_mgr 의 마운트 실패 이유가 콘솔에 **한 번도** 나오지 않았습니다.
+- **`seriallogcat`**: ueventd 이후 안드로이드는 logcat 으로만 로그를 남깁니다.
+  조립 단계에서 init.rc 에 logcat 을 콘솔로 흘리는 서비스를 심습니다.
 
 ---
 

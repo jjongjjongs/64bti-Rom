@@ -407,6 +407,13 @@ jobs:
             grep -aE "SystemServer|ActivityManager: Displayed|Boot is finished|BOOT_COMPLETED|bootanim|SurfaceFlinger: Boot|zygote.*Preload|PackageManager: Time to scan|Enabled StrictMode" "$f" \
               | sed 's/^\[[0-9. ]*\] //' | awk '!b[$0]++' | tail -14
 
+            # SurfaceFlinger 는 지금 부팅의 마지막 관문이라 따로 본다. abort 사유와
+            # 그래픽 HAL 로딩 결과가 다른 로그에 밀리지 않게 자기 구간을 준다.
+            echo "  --- SurfaceFlinger / 그래픽 ---"
+            grep -aE "Abort message|SurfaceFlinger|surfaceflinger|libEGL|EGL|gralloc|hwcomposer|HWComposer|RenderEngine|emulation|qemu_pipe|OpenglSystemCommon|HostConnection" "$f" \
+              | grep -avE "init\.wrapper: wd |Starting service|killed by signal 9" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!g[$0]++' | head -22
+
             echo "  --- 죽은 서비스가 남긴 말 ---"
             grep -aE "Abort message|surfaceflinger|SurfaceFlinger|gralloc|hwcomposer|qemu_pipe|libEGL|EGL_|eglInitialize|HAL module|hw_get_module|Terminating|exited with status|killed by signal|SELinux: Failed|servicemanager" "$f" \
               | grep -avE "init\.wrapper: wd |Starting service|killed by signal 9" \

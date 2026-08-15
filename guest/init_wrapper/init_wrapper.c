@@ -308,7 +308,13 @@ static void probe_data_mount(void) {
 // 서비스가 반복 실패했다고 판단해 recovery 로 리부트한다. 커널에 드라이버가 없는 것인지
 // 노드만 안 만들어진 것인지에 따라 고칠 곳이 완전히 다르므로, 둘을 갈라서 본다.
 static void probe_binder(void) {
-    const char *nodes[] = {"/dev/binder", "/dev/hwbinder", "/dev/vndbinder", "/dev/binderfs"};
+    // qemu_pipe 는 ranchu 그래픽 HAL 이 호스트 렌더러와 이야기하는 통로다. 이게 없으면
+    // gralloc.ranchu / libEGL_emulation 이 호스트에 붙지 못하고, SurfaceFlinger::init 이
+    // EGL 설정에 실패해 LOG_ALWAYS_FATAL 로 abort 한다(실측 백트레이스가 그 지점이다).
+    // fb0/dri 는 그 대안인 소프트웨어 프레임버퍼 경로가 열려 있는지 확인하는 것이다.
+    const char *nodes[] = {"/dev/binder", "/dev/hwbinder", "/dev/vndbinder", "/dev/binderfs",
+                           "/dev/qemu_pipe", "/dev/goldfish_pipe",
+                           "/dev/graphics/fb0", "/dev/fb0", "/dev/dri/card0"};
     for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
         put_fmt("wd dev: %s %s", nodes[i], access(nodes[i], F_OK) == 0 ? "exists" : "MISSING");
     }
