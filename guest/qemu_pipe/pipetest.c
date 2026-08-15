@@ -47,6 +47,18 @@ int main(void) {
         "pipe:pipetest:two",
         "pipe:pipetest:three",
     };
+    // 데몬보다 먼저 도는 경우가 있다(실측: 0/3). 장치가 생길 때까지 기다린다.
+    int waited = 0;
+    while (access(PIPE_DEV, F_OK) != 0) {
+        if (waited >= 60000) {
+            put("FAIL %s never appeared after %dms", PIPE_DEV, waited);
+            return 1;
+        }
+        usleep(200 * 1000);
+        waited += 200;
+    }
+    put("%s ready after %dms", PIPE_DEV, waited);
+
     int fds[N_PIPES];
     int opened = 0;
 

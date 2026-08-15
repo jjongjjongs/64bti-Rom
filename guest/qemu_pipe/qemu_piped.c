@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -445,22 +446,50 @@ static int cuse_handshake(const struct fuse_in_header *in, const struct cuse_ini
     return 0;
 }
 
-// ueventd 가 /dev/qemu_pipe 를 만들 때 권한 규칙이 없으면 0600 root:root 가 된다.
-// surfaceflinger 는 system 권한이라 그러면 열지 못한다. 노드가 생기는 즉시 열어준다.
-static void *chmod_watcher(void *unused) {
+// 장치 노드는 우리가 직접 만든다.
+//
+// 커널은 CUSE_INIT 응답을 받으면 /sys/class/cuse/<이름> 아래에 장치를 등록하고 uevent 를
+// 쏜다. 원래는 ueventd 가 그걸 보고 /dev 에 노드를 만들어야 하는데, 실측으로 만들어지지
+// 않았다(CUSE_INIT 은 성공했는데 /dev/qemu_pipe 가 끝내 안 생김). ueventd 의 규칙을
+// 파고드는 대신, 커널이 배정한 major:minor 를 sysfs 에서 읽어 우리가 mknod 한다.
+// 어차피 권한도 0666 으로 열어줘야 한다 — ueventd 기본값은 0600 root:root 인데
+// surfaceflinger 는 system 권한으로 돈다.
+static void *device_watcher(void *unused) {
     (void)unused;
+    const char *devattr = "/sys/class/cuse/" DEV_NAME "/dev";
+
     for (int i = 0; i < 600; i++) {
-        struct stat st;
-        if (stat(PIPE_DEV, &st) == 0) {
-            if ((st.st_mode & 0777) != 0666 && chmod(PIPE_DEV, 0666) == 0) {
-                put("chmod 0666 %s", PIPE_DEV);
+        int fd = open(devattr, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            char buf[64] = {0};
+            ssize_t n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            unsigned major = 0, minor = 0;
+            if (n > 0 && sscanf(buf, "%u:%u", &major, &minor) == 2) {
+                struct stat st;
+                if (stat(PIPE_DEV, &st) != 0) {
+                    if (mknod(PIPE_DEV, S_IFCHR | 0666, makedev(major, minor)) != 0) {
+                        put("FAIL mknod %s (%u:%u): %s",
+                            PIPE_DEV, major, minor, strerror(errno));
+                        return NULL;
+                    }
+                    put("created %s as %u:%u", PIPE_DEV, major, minor);
+                }
+                if (chmod(PIPE_DEV, 0666) != 0) {
+                    put("WARN chmod %s: %s", PIPE_DEV, strerror(errno));
+                }
+                put("OK %s ready", PIPE_DEV);
+                return NULL;
             }
+            put("WARN %s unreadable: %s", devattr, strerror(errno));
             return NULL;
         }
         struct timespec ts = {0, 100 * 1000000L};
         nanosleep(&ts, NULL);
     }
-    put("WARN %s never appeared", PIPE_DEV);
+    // 여기까지 오면 커널이 장치를 아예 등록하지 않은 것이다 — CUSE_INIT 응답 자체를
+    // 커널이 거부했다는 뜻이라, ueventd 가 아니라 우리 응답을 봐야 한다.
+    put("FAIL %s never appeared - kernel did not register the CUSE device", devattr);
     return NULL;
 }
 
@@ -487,7 +516,7 @@ int main(void) {
     }
 
     pthread_t watcher;
-    pthread_create(&watcher, NULL, chmod_watcher, NULL);
+    pthread_create(&watcher, NULL, device_watcher, NULL);
     pthread_detach(watcher);
 
     static unsigned char buf[REQ_BUF];
