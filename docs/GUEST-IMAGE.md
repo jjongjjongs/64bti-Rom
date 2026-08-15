@@ -348,7 +348,7 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 5 | `/init` 이 넘겨받는다 | ✅ | `CONFIG_LSM` 에 selinux 가 없으면 selinuxfs 미등록 → 정책 로드 실패 |
 | 6 | `/system` `/cache` `/data` 마운트 | ✅ | **장치 순서** (아래 7.1) |
 | 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
-| 8 | SurfaceFlinger | ❌ | `SurfaceFlinger::init()` 에서 abort — 아래 7.3 |
+| 8 | SurfaceFlinger | ❌ | EGL ES2 config 없음 — goldfish pipe 필수 확정, 아래 7.3 |
 | 9 | emugl 연결 | ❌ | 8번에 막혀 도달 못 함 |
 
 ### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
@@ -407,7 +407,7 @@ API 24 armeabi-v7a 유저스페이스는 옛 **32비트 바인더 API(프로토�
 치환을 하고, **치환이 안 먹으면 빌드를 실패시킵니다** — 조용히 잘못된 ABI 의 커널을
 만드는 것이 가장 나쁩니다.
 
-### 7.3 지금 막혀 있는 곳: SurfaceFlinger
+### 7.3 지금 막혀 있는 곳: SurfaceFlinger — goldfish pipe 가 필수임이 확정됐다
 
 ```
 F DEBUG: pid: 4665, name: surfaceflinger >>> /system/bin/surfaceflinger <<<
@@ -421,9 +421,40 @@ Android 7 의 init.rc 는 surfaceflinger 에 `onrestart restart zygote` 를 걸�
 "Preloading classes" 였습니다). **부팅이 느린 것이 아니라 계속 처음부터 다시 하는
 것**이라는 점을 착각하기 쉽습니다.
 
-`SurfaceFlinger::init()` 은 EGL/gralloc 설정 실패에 `LOG_ALWAYS_FATAL` 을 겁니다.
-ranchu 그래픽 HAL 은 `/dev/qemu_pipe` 로 호스트 렌더러에 붙는데, 이 게스트에는 goldfish
-pipe 드라이버도 장치도 없습니다 — 4.2 에서 미룬 바로 그 전송로입니다.
+`SurfaceFlinger::init()` 은 EGL 설정 실패에 `LOG_ALWAYS_FATAL` 을 겁니다.
+
+**소프트웨어 렌더링 우회는 불가능합니다(실측).** "파이프 없이 일단 화면부터" 를
+시도했고, 결과는 명확한 부정입니다:
+
+1. 커널에 DRM + virtio-gpu + fbdev 에뮬레이션을 넣어 `/dev/dri/card0` 과
+   `/dev/graphics/fb0` 을 만들었습니다. **화면 장치는 이제 있습니다.**
+2. `qemu=1 qemu.gles=0` 으로 libEGL 이 소프트웨어 렌더러
+   (`libGLES_android.so` = libagl)를 쓰게 했습니다.
+3. 그런데도 SF 는 이렇게 죽습니다:
+
+```
+W SurfaceFlinger: no suitable EGLConfig found, trying a simpler query
+F SurfaceFlinger: no suitable EGLConfig found, giving up
+```
+
+이유: Android 7 의 SurfaceFlinger 는 EGL 에 **ES2/ES3 렌더러블 config** 를 요구하는데
+libagl 은 **OpenGL ES 1.1 전용**입니다. 이미지에 SwiftShader 도 없습니다
+(`/lib/egl` 에는 `libEGL_emulation`, `libGLES_android`, `libGLESv1_CM_emulation`,
+`libGLESv2_emulation` 뿐). 즉 **ES2 를 제공하는 소프트웨어 경로 자체가 존재하지
+않습니다.** Android 6 부터 SF 의 비-GL 경로가 사라졌기 때문에 우회로도 없습니다.
+
+따라서 남은 길은 하나뿐입니다 — `libEGL_emulation.so` 가 `/dev/qemu_pipe` 로 호스트
+렌더러에 붙는 원래 설계. **goldfish pipe 전송로는 선택이 아니라 필수입니다.**
+cmdline 도 `qemu.gles=1`(에뮬레이션 드라이버)로 되돌려 뒀습니다. 그래야 실패 지점이
+"파이프 없음"으로 정직하게 나옵니다.
+
+> ⚠ virtio-gpu 를 켤 때 함께 필요한 것: **`-global virtio-mmio.force-legacy=false`**.
+> virtio-mmio 는 기본이 legacy 라 `VIRTIO_F_VERSION_1` 을 제시하지 않는데 virtio-gpu 는
+> 그것을 요구합니다. 그러면 probe 가 실패하고, 5.10 의 실패 처리 경로가 초기화도 안 된
+> modeset 을 정리하려다 **커널을 oops 시켜 init 을 죽입니다**:
+> `virtio_gpu_probe -> drm_dev_put -> virtio_gpu_release -> virtio_gpu_modeset_fini`.
+> 증상은 `Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b` 라
+> 원인과 전혀 안 닮았으니 주의하세요.
 
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 

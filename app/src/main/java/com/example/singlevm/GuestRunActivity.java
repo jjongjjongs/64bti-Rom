@@ -70,7 +70,7 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      */
     private static final String DEFAULT_KERNEL_CMDLINE =
             "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on"
-                + " qemu=1 qemu.gles=0"
+                + " qemu=1 qemu.gles=1"
                     + " androidboot.hardware=ranchu androidboot.selinux=permissive"
                     + " binder.devices=binder,hwbinder,vndbinder"
                     + " rdinit=/init.wrapper root=/dev/ram0 rw";
@@ -413,6 +413,15 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         command.add("1024");
         command.add("-display");
         command.add("none");
+        // virtio-mmio 는 기본이 legacy 라 VIRTIO_F_VERSION_1 을 제시하지 않는다. virtio-gpu 는
+        // 그 기능을 요구하므로 probe 가 실패하고, 게스트 커널 5.10 의 실패 처리 경로가
+        // 초기화도 안 된 modeset 을 정리하려다 oops 를 내며 init 을 죽인다. 증상은
+        // "Attempted to kill init! exitcode=0x0000000b" 라 원인과 전혀 안 닮았다.
+        //
+        // 이 옵션은 QEMU 4.0 이상에서만 존재한다. 번들 QEMU 가 모르면 시작하자마자
+        // 오류로 죽는데, 그 메시지는 qemu-modern.log 첫 줄에 그대로 남는다.
+        command.add("-global");
+        command.add("virtio-mmio.force-legacy=false");
         command.add("-device");
         command.add("virtio-gpu-device,xres=480,yres=800");
         File transportDir = new File(vmRootPath, "transport");
