@@ -72,6 +72,13 @@ make -s multi_v7_defconfig
 # SCHED_TUNE 은 여기 없다. 5.10 에서 제거됐고(uclamp 로 대체) --enable 해봐야 조용히
 # 무시된다. init 이 /sys/fs/cgroup/stune 쓰기에 실패하며 로그를 남기지만 치명적이지 않다.
 #
+# DRM/virtio-gpu 를 켜는 이유: 호스트는 -device virtio-gpu-device 를 붙이는데 커널에
+# 드라이버가 없어서 게스트에 화면 장치가 하나도 없었다(실측: /dev/dri/card0, /dev/fb0,
+# /dev/graphics/fb0 전부 없음). SurfaceFlinger::init() 이 그릴 곳을 못 찾아 abort 하고,
+# init.rc 의 "onrestart restart zygote" 때문에 부팅 전체가 무한 재시작에 빠졌다.
+# FBDEV_EMULATION 이 DRM 위에 /dev/fb0 을 만들어 주고, ueventd 가 그것을
+# /dev/graphics/fb0 으로 올린다 — Android 7 의 프레임버퍼 gralloc 이 여는 경로다.
+#
 # netfilter 를 켜는 이유: netd 가 부팅할 때마다
 #   "iptables v1.4.20: can't initialize iptables table `filter': Table does not exist"
 # 로 방화벽 규칙 설치에 전부 실패한다. multi_v7_defconfig 에는 iptables 테이블이 없다.
@@ -99,6 +106,8 @@ make -s multi_v7_defconfig
   --enable CGROUP_CPUACCT --enable MEMCG --enable CGROUP_FREEZER \
   --enable CGROUP_DEVICE --enable CPUSETS \
   --enable KALLSYMS --enable KALLSYMS_ALL \
+  --enable DRM --enable DRM_VIRTIO_GPU --enable DRM_FBDEV_EMULATION \
+  --enable FB --enable FB_DEVICE --enable FRAMEBUFFER_CONSOLE \
   --enable NETFILTER --enable NETFILTER_ADVANCED --enable NETFILTER_XTABLES \
   --enable NF_CONNTRACK --enable NF_NAT \
   --enable IP_NF_IPTABLES --enable IP_NF_FILTER --enable IP_NF_TARGET_REJECT \
@@ -119,7 +128,8 @@ make -s olddefconfig
 for opt in CONFIG_VIRTIO_CONSOLE CONFIG_SECURITY_SELINUX CONFIG_ANDROID_BINDER_IPC \
            CONFIG_ANDROID_BINDERFS CONFIG_ANDROID_BINDER_DEVICES \
            CONFIG_ASHMEM CONFIG_LSM CONFIG_KALLSYMS \
-           CONFIG_IP_NF_FILTER CONFIG_IP6_NF_FILTER; do
+           CONFIG_IP_NF_FILTER CONFIG_IP6_NF_FILTER \
+           CONFIG_DRM_VIRTIO_GPU CONFIG_DRM_FBDEV_EMULATION CONFIG_FB; do
   printf '%-34s %s\n' "$opt" "$(grep -E "^$opt=" .config || echo '(설정 안 됨)')"
 done | tee "$(dirname "$OUT")/kernel-config.txt"
 
