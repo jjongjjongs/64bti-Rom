@@ -9,8 +9,14 @@
 확인하려는 것은 딱 하나 — 게스트에서 나온 바이트가 호스트 소켓까지 실제로 도달하는가,
 그리고 그 첫 바이트가 "pipe:opengles" 인가. 전송로 전체를 GLES 를 빼고 검증하는 셈이다.
 
-사용법: host_listener.py <소켓경로> [<소켓경로> ...]
+사용법: host_listener.py <소켓이 생길 디렉터리>
+
+디렉터리를 받는 이유: 이 청취기는 QEMU 보다 먼저 떠야 첫 바이트를 놓치지 않는데, 그
+시점에는 소켓 파일이 아직 없다. 셸에서 pipe*.sock 을 미리 펼치면 아무것도 매치되지
+않아 글로브 문자열이 그대로 넘어온다(실측: "[pipe*.sock] 연결 실패"). 그래서 탐색과
+대기를 여기서 한다.
 """
+import glob
 import os
 import socket
 import sys
@@ -19,6 +25,7 @@ import time
 
 CONNECT_TIMEOUT_S = 240
 RECONNECT_DELAY_S = 0.5
+DISCOVER_TIMEOUT_S = 120
 
 
 def log(msg: str) -> None:
@@ -69,10 +76,25 @@ def watch(path: str) -> None:
 
 
 def main() -> int:
-    paths = sys.argv[1:]
-    if not paths:
-        log("소켓 경로를 하나 이상 넘겨야 합니다")
+    if len(sys.argv) != 2:
+        log("사용법: host_listener.py <소켓 디렉터리>")
         return 2
+    directory = sys.argv[1]
+
+    # QEMU 가 소켓을 만들 때까지 기다린다.
+    pattern = os.path.join(directory, "pipe*.sock")
+    deadline = time.monotonic() + DISCOVER_TIMEOUT_S
+    paths: list = []
+    while time.monotonic() < deadline:
+        paths = sorted(glob.glob(pattern))
+        if paths:
+            break
+        time.sleep(RECONNECT_DELAY_S)
+    if not paths:
+        log(f"소켓을 찾지 못했습니다: {pattern}")
+        return 1
+    log(f"소켓 {len(paths)}개 발견: {', '.join(os.path.basename(p) for p in paths)}")
+
     threads = [threading.Thread(target=watch, args=(p,), daemon=True) for p in paths]
     for t in threads:
         t.start()

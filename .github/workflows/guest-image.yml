@@ -347,7 +347,7 @@ jobs:
             # 앱에서는 libemugl_probe.so 가 이 소켓들에 붙는다. CI 에는 렌더러가 없어
             # 아무도 안 붙고, 그래서 게스트가 파이프를 여는지조차 볼 수 없었다.
             # 듣기만 하는 대역을 띄워 "게스트 -> 호스트" 방향을 실제로 확인한다.
-            python3 guest/qemu_pipe/host_listener.py "$BOOT"/transport/pipe*.sock \
+            python3 guest/qemu_pipe/host_listener.py "$BOOT/transport" \
               > "$BOOT/pipe-listener.log" 2>&1 &
             local listener=$!
 
@@ -464,7 +464,7 @@ jobs:
             echo "  --- SurfaceFlinger / 그래픽 ---"
             grep -aE "Abort message|SurfaceFlinger|surfaceflinger|libEGL|EGL|gralloc|hwcomposer|HWComposer|RenderEngine|emulation|qemu_pipe|OpenglSystemCommon|HostConnection" "$f" \
               | grep -avE "init\.wrapper: wd |Starting service|killed by signal 9" \
-              | sed 's/^\[[0-9. ]*\] //' | awk '!g[$0]++' | head -22
+              | sed 's/^\[[0-9. ]*\] //' | awk '!g[$0]++' | tail -26
 
             echo "  --- 죽은 서비스가 남긴 말 ---"
             grep -aE "Abort message|surfaceflinger|SurfaceFlinger|gralloc|hwcomposer|qemu_pipe|libEGL|EGL_|eglInitialize|HAL module|hw_get_module|Terminating|exited with status|killed by signal|SELinux: Failed|servicemanager" "$f" \
