@@ -79,6 +79,12 @@ make -s multi_v7_defconfig
 # FBDEV_EMULATION 이 DRM 위에 /dev/fb0 을 만들어 주고, ueventd 가 그것을
 # /dev/graphics/fb0 으로 올린다 — Android 7 의 프레임버퍼 gralloc 이 여는 경로다.
 #
+# FUSE/CUSE 를 켜는 이유: ranchu 그래픽 스택은 /dev/qemu_pipe 라는 문자 장치를 연다.
+# 번들 QEMU 에는 goldfish_pipe 장치가 없어서(strings 로 확인: goldfish_pic/rtc/tty 만
+# 있음) 커널 드라이버로는 만들 수 없고, 전송로는 virtio-serial 포트다. 파이프 하나가
+# 포트 하나이므로 open 마다 빈 포트를 배정해 줄 무언가가 필요한데, 커널 밖에서 문자
+# 장치를 만드는 방법이 CUSE 다. guest/qemu_pipe/qemu_piped.c 가 그 데몬이다.
+#
 # netfilter 를 켜는 이유: netd 가 부팅할 때마다
 #   "iptables v1.4.20: can't initialize iptables table `filter': Table does not exist"
 # 로 방화벽 규칙 설치에 전부 실패한다. multi_v7_defconfig 에는 iptables 테이블이 없다.
@@ -106,6 +112,7 @@ make -s multi_v7_defconfig
   --enable CGROUP_CPUACCT --enable MEMCG --enable CGROUP_FREEZER \
   --enable CGROUP_DEVICE --enable CPUSETS \
   --enable KALLSYMS --enable KALLSYMS_ALL \
+  --enable FUSE_FS --enable CUSE \
   --enable DRM --enable DRM_VIRTIO_GPU --enable DRM_FBDEV_EMULATION \
   --enable FB --enable FB_DEVICE --enable FRAMEBUFFER_CONSOLE \
   --enable NETFILTER --enable NETFILTER_ADVANCED --enable NETFILTER_XTABLES \
@@ -129,7 +136,8 @@ for opt in CONFIG_VIRTIO_CONSOLE CONFIG_SECURITY_SELINUX CONFIG_ANDROID_BINDER_I
            CONFIG_ANDROID_BINDERFS CONFIG_ANDROID_BINDER_DEVICES \
            CONFIG_ASHMEM CONFIG_LSM CONFIG_KALLSYMS \
            CONFIG_IP_NF_FILTER CONFIG_IP6_NF_FILTER \
-           CONFIG_DRM_VIRTIO_GPU CONFIG_DRM_FBDEV_EMULATION CONFIG_FB; do
+           CONFIG_DRM_VIRTIO_GPU CONFIG_DRM_FBDEV_EMULATION CONFIG_FB \
+           CONFIG_FUSE_FS CONFIG_CUSE; do
   printf '%-34s %s\n' "$opt" "$(grep -E "^$opt=" .config || echo '(설정 안 됨)')"
 done | tee "$(dirname "$OUT")/kernel-config.txt"
 

@@ -1,0 +1,80 @@
+// pipetest — /dev/qemu_pipe 를 여러 개 동시에 열어 다중화가 실제로 되는지 확인한다
+//
+// CI 에는 호스트 렌더러가 없으므로 GLES 가 도는지는 확인할 수 없다. 하지만 확인해야 할
+// 것이자 확인 가능한 것은 따로 있다 — CUSE 데몬이 open 마다 서로 다른 virtio-serial
+// 포트를 배정하는가. 그게 이 데몬의 존재 이유 전부다.
+//
+// 파이프를 세 개 열어 서로 다른 서비스 이름을 쓴다. 호스트 청취기에 서로 다른 소켓으로
+// 각각의 이름이 나타나면 다중화가 동작하는 것이고, 하나만 나타나거나 두 번째 open 이
+// 실패하면 안 되는 것이다. 심볼릭 링크 방식에서는 반드시 후자가 된다.
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#define TAG "pipetest: "
+#define PIPE_DEV "/dev/qemu_pipe"
+#define N_PIPES 3
+
+static int g_log = -1;
+
+__attribute__((format(printf, 1, 2)))
+static void put(const char *fmt, ...) {
+    if (g_log < 0) return;
+    char line[320];
+    int n = snprintf(line, sizeof(line), TAG);
+    va_list ap;
+    va_start(ap, fmt);
+    int m = vsnprintf(line + n, sizeof(line) - (size_t)n - 2, fmt, ap);
+    va_end(ap);
+    if (m < 0) return;
+    n += m;
+    if ((size_t)n >= sizeof(line) - 1) n = (int)sizeof(line) - 2;
+    line[n++] = '\n';
+    ssize_t unused = write(g_log, line, (size_t)n);
+    (void)unused;
+}
+
+int main(void) {
+    g_log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+
+    // 실제 클라이언트가 쓰는 것과 같은 이름들. 호스트 로그에서 어느 파이프인지 구분된다.
+    static const char *services[N_PIPES] = {
+        "pipe:pipetest:one",
+        "pipe:pipetest:two",
+        "pipe:pipetest:three",
+    };
+    int fds[N_PIPES];
+    int opened = 0;
+
+    for (int i = 0; i < N_PIPES; i++) {
+        fds[i] = open(PIPE_DEV, O_RDWR);
+        if (fds[i] < 0) {
+            put("FAIL open #%d failed: %s", i + 1, strerror(errno));
+            continue;
+        }
+        opened++;
+        size_t len = strlen(services[i]) + 1;  // 끝의 NUL 까지 보내야 한다
+        ssize_t n = write(fds[i], services[i], len);
+        if (n != (ssize_t)len) {
+            put("FAIL write #%d: %zd of %zu (%s)", i + 1, n, len, strerror(errno));
+        } else {
+            put("OK pipe #%d open+write %s", i + 1, services[i]);
+        }
+    }
+
+    put("%s %d/%d pipes opened concurrently",
+        opened == N_PIPES ? "RESULT ok:" : "RESULT PARTIAL:", opened, N_PIPES);
+
+    // 호스트가 읽어갈 시간을 잠깐 준 뒤 닫는다. 닫으면 포트가 풀로 돌아가므로,
+    // 이 프로그램이 끝난 뒤에는 그래픽 스택이 세 개를 다시 쓸 수 있어야 한다.
+    sleep(5);
+    for (int i = 0; i < N_PIPES; i++) {
+        if (fds[i] >= 0) close(fds[i]);
+    }
+    put("closed all, ports returned to the pool");
+    return opened == N_PIPES ? 0 : 1;
+}
