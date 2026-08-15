@@ -283,8 +283,14 @@ jobs:
           WORK="$GITHUB_WORKSPACE/guest-out"
           BOOT=/tmp/boot && mkdir -p "$BOOT/transport"
 
+          # virtio-mmio 는 기본이 force-legacy=true 라 VIRTIO_F_VERSION_1 을 제시하지 않는다.
+          # virtio-gpu 는 그 기능을 요구하므로 probe 가 실패하고, 5.10 의 실패 경로가
+          # 초기화도 안 된 modeset 을 정리하려다 커널을 oops 시킨다(실측 백트레이스:
+          # virtio_gpu_probe -> drm_dev_put -> virtio_gpu_release -> virtio_gpu_modeset_fini).
+          # 그 oops 가 init 을 죽여 "Attempted to kill init" 패닉이 났다.
           ARGS=(-machine virt,gic-version=3 -cpu cortex-a15
                 -accel tcg,thread=multi,tb-size=256 -smp 2 -m 1024
+                -global virtio-mmio.force-legacy=false
                 -display none -no-reboot
                 -device virtio-gpu-device,xres=480,yres=800
                 -device virtio-serial-device)
