@@ -404,6 +404,12 @@ jobs:
 
             # 중복 제거: keep_bootcon 때문에 모든 줄이 두 번 찍힌다. avc 감사 로그는
             # permissive 라 무해한데 수십 줄이라 정작 볼 것을 밀어낸다.
+            # 커널이 init 으로 넘어가는 구간. 여기서 죽으면 나머지 필터는 전부 빈손이라
+            # 무슨 일이 있었는지 알 방법이 없다.
+            echo "  --- 커널 -> init 인계 ---"
+            grep -aE "Kernel command line|Uncompressing|Freeing initrd|Run /|rdinit|Attempted to kill init|Trying to unpack|initramfs|Failed to execute|request_module|drm|virtio_gpu|fb0|Console: |Warning: unable" "$f" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!k[$0]++' | head -24
+
             echo "  --- 부팅 경로 ---"
             grep -aE "init\.wrapper: (start|OK|FAIL|vport|exec|watchdog)|Kernel panic|first stage|second stage|fs_mgr|__mount|EXT4-fs|reboot:|zygote|Zygote|servicemanager|surfaceflinger|SurfaceFlinger|bootanim|system_server|Starting service|returned an error|cgroup" "$f" \
               | grep -avE "not defined in policy|Class .* not defined|avc:  denied" \
