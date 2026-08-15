@@ -349,7 +349,7 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 6 | `/system` `/cache` `/data` 마운트 | ✅ | **장치 순서** (아래 7.1) |
 | 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
 | 8 | SurfaceFlinger | ❌ | EGL ES2 config 없음 — goldfish pipe 필수 확정, 아래 7.3 |
-| 9 | emugl 연결 | ❌ | 8번에 막혀 도달 못 함 |
+| 9 | emugl 연결 | 🔶 | 전송로는 검증됨(7.3b). 동시 파이프용 CUSE 데몬이 남음 |
 
 ### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
 
@@ -455,6 +455,46 @@ cmdline 도 `qemu.gles=1`(에뮬레이션 드라이버)로 되돌려 뒀습니�
 > `virtio_gpu_probe -> drm_dev_put -> virtio_gpu_release -> virtio_gpu_modeset_fini`.
 > 증상은 `Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b` 라
 > 원인과 전혀 안 닮았으니 주의하세요.
+
+### 7.3b goldfish pipe 전송로 — 게스트→호스트 방향 검증 완료
+
+`qemu_pipe_link` 로 `/dev/qemu_pipe` 를 virtio-serial 포트에 걸고, CI 에서 호스트 소켓에
+붙어 듣는 청취기(`guest/qemu_pipe/host_listener.py`)를 띄웠더니 이렇게 나왔습니다:
+
+```
+소켓 8개 발견: pipe0.sock ... pipe7.sock
+[pipe0.sock] 연결됨
+[pipe0.sock] *** 서비스 헤더: 'pipe:qemud:boot-properties' (27 바이트 수신) ***
+[pipe0.sock] 게스트가 닫음 (총 35 바이트)
+```
+
+**게스트 안의 프로세스가 `/dev/qemu_pipe` 를 열고 서비스 이름을 썼고, 그 바이트가 호스트
+유닉스 소켓까지 도달했습니다.** 추정이 아니라 실제 goldfish pipe 트래픽입니다. 이로써
+확인된 것:
+
+- 파이프 하나 = virtio-serial 포트 하나 매핑이 맞습니다. 프레이밍도 다중화 프로토콜도
+  필요 없습니다.
+- 호스트 절반(`libemugl_probe.so`)은 이미 이 헤더를 읽을 준비가 돼 있습니다.
+- 앱이 포트를 8개 붙여둔 것이 곧 "동시 파이프 8개" 설계입니다.
+
+또한 `qemu.gles=1` 로 libEGL 이 에뮬레이션 드라이버를 실제로 적재합니다:
+
+```
+D libEGL: Emulator has host GPU support, qemu.gles is set to 1.
+D libEGL: loaded /system/lib/egl/libEGL_emulation.so
+D libEGL: loaded /system/lib/egl/libGLESv1_CM_emulation.so
+D libEGL: loaded /system/lib/egl/libGLESv2_emulation.so
+```
+
+(`libGLES_emulation.so` dlopen 실패는 정상입니다 — libEGL 이 통합 라이브러리를 먼저
+찾아보고 없으면 분리된 것들을 씁니다.)
+
+**남은 것: 동시 파이프.** `qemu_pipe_link` 는 심볼릭 링크라 포트가 하나뿐이고,
+virtio_console 은 포트당 동시 접속이 하나입니다(두 번째 open 은 EBUSY). 위 로그에서
+그 하나를 `qemu-props` 가 먼저 가져갔습니다. SurfaceFlinger 와 앱 프로세스들이 각자
+파이프를 열어야 하므로, **open 마다 빈 포트를 배정하는 CUSE 데몬**이 필요합니다.
+호스트 렌더러 없이도 CI 에서 검증 가능합니다 — 게스트에서 파이프를 여러 개 열어
+서로 다른 서비스 이름을 쓰면, 청취기에 서로 다른 소켓으로 나타나야 합니다.
 
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 
