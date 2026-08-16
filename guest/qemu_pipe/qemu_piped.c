@@ -32,6 +32,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -212,20 +213,41 @@ struct request {
     unsigned char *payload; // write 전용, malloc
 };
 
-struct pipe_slot {
-    int in_use;
-    int fd;                 // 배정된 vport
-    int port_index;
-    pthread_t worker;
+// 읽기와 쓰기는 각자의 큐와 각자의 스레드를 갖는다.
+//
+// 처음에는 파이프당 워커 하나에 큐 하나였다. 그것이 교착을 만든다 — 호스트가 아직
+// 보낼 것이 없으면 read 가 블록되고, 큐가 FIFO 라서 그 뒤에 온 write 는 영영 차례가
+// 오지 않는다. 진짜 goldfish pipe 는 같은 파이프에 읽기와 쓰기가 동시에 가능하고,
+// emugl 도 그렇게 쓴다.
+//
+// 실측: SurfaceFlinger 가 100초 넘게 `fuse_simple_request` 에서 멈춰 있었다. 그건
+// 커널 FUSE 클라이언트가 유저스페이스 데몬의 응답을 기다리는 자리다 — 즉 호스트가
+// 아니라 이 데몬이 답을 안 하고 있었다.
+struct req_queue {
     pthread_mutex_t lock;
     pthread_cond_t cv;
     struct request *head, *tail;
     int stop;
+};
+
+struct pipe_slot;
+struct worker_arg {
+    struct pipe_slot *s;
+    int is_read;
+};
+
+struct pipe_slot {
+    int in_use;
+    int fd;                 // 배정된 vport (O_NONBLOCK)
+    int port_index;
+    int slot_no;            // 로그에 찍을 1-기반 번호
+    pthread_t rd_worker, wr_worker;
+    struct worker_arg rd_arg, wr_arg;
+    struct req_queue rq, wq;
     // 바이트 수를 세는 이유: "호스트가 답을 하는가"가 지금 가장 중요한 질문인데,
     // 답하지 않는 것과 게스트가 애초에 안 보내는 것이 로그상 똑같이 조용하다.
     unsigned long tx, rx;   // tx=게스트→호스트, rx=호스트→게스트
     int rx_announced;       // 첫 응답만 한 번 알린다
-    int slot_no;            // 로그에 찍을 1-기반 번호
 };
 
 static char g_ports[MAX_PIPES][288];
@@ -290,45 +312,75 @@ static void reply(uint64_t unique, int error, const void *data, size_t len) {
     }
 }
 
-static ssize_t write_all(int fd, const unsigned char *p, size_t len) {
-    size_t done = 0;
-    while (done < len) {
-        ssize_t n = write(fd, p + done, len - done);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        if (n == 0) break;
-        done += (size_t)n;
-    }
-    return (ssize_t)done;
-}
+// (write_all 은 없어졌다. 쓰기 워커가 poll 로 기다리며 직접 나눠 쓴다 — 논블로킹
+//  fd 에서는 짧은 쓰기와 EAGAIN 을 같이 다뤄야 해서 한 곳에 모아 두는 편이 낫다.)
 
 // ---------------------------------------------------------------------------
 // 워커: 파이프 하나의 블로킹 I/O 를 전담한다
 // ---------------------------------------------------------------------------
 
+// fd 가 준비될 때까지 기다린다. 블로킹 read/write 를 그냥 부르지 않는 이유는 진단이다 —
+// 멈추면 왜 멈췄는지 말할 수 있어야 한다.
+//
+// POLLOUT 이 안 오는 것과 POLLIN 이 안 오는 것은 뜻이 다르다. virtio_console 은
+// 호스트가 그 포트에 붙어 있을 때만 POLLOUT 을 준다. 그래서 write 가 못 나가면
+// "호스트가 이 포트에 연결돼 있지 않다"는 뜻이고, read 가 안 되면 "연결은 됐는데
+// 보낼 것이 없다"는 뜻이다. 로그만 봐서는 구분되지 않던 두 경우다.
+static int io_wait(struct pipe_slot *s, short events, const char *what) {
+    struct pollfd p = {.fd = s->fd, .events = events, .revents = 0};
+    int waited_ms = 0;
+    for (;;) {
+        int n = poll(&p, 1, 5000);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            put("pipe %d: poll(%s) 실패: %s", s->slot_no, what, strerror(errno));
+            return -1;
+        }
+        if (n > 0) {
+            if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                put("pipe %d: %s 중 포트가 끊김 (revents=0x%x)",
+                    s->slot_no, what, p.revents);
+                return -1;
+            }
+            if (waited_ms) put("pipe %d: %s 재개 (%dms 대기)", s->slot_no, what, waited_ms);
+            return 0;
+        }
+        waited_ms += 5000;
+        // 처음 두 번만 알리고 그 뒤로는 1분에 한 번. 멈춘 것은 알려야 하지만
+        // 로그를 도배하면 정작 다른 것이 안 보인다.
+        if (waited_ms <= 10000 || waited_ms % 60000 == 0) {
+            put("pipe %d: %s 가 %d초째 대기 중%s", s->slot_no, what, waited_ms / 1000,
+                (events & POLLOUT) ? " (호스트가 이 포트에 붙어 있지 않다)" : " (호스트가 조용하다)");
+        }
+    }
+}
+
 static void *worker_main(void *arg) {
-    struct pipe_slot *s = arg;
+    struct worker_arg *wa = arg;
+    struct pipe_slot *s = wa->s;
+    struct req_queue *q = wa->is_read ? &s->rq : &s->wq;
     unsigned char buf[MAX_WRITE];
 
     for (;;) {
-        pthread_mutex_lock(&s->lock);
-        while (!s->head && !s->stop) pthread_cond_wait(&s->cv, &s->lock);
-        if (s->stop && !s->head) {
-            pthread_mutex_unlock(&s->lock);
+        pthread_mutex_lock(&q->lock);
+        while (!q->head && !q->stop) pthread_cond_wait(&q->cv, &q->lock);
+        if (q->stop && !q->head) {
+            pthread_mutex_unlock(&q->lock);
             break;
         }
-        struct request *r = s->head;
-        s->head = r->next;
-        if (!s->head) s->tail = NULL;
-        pthread_mutex_unlock(&s->lock);
+        struct request *r = q->head;
+        q->head = r->next;
+        if (!q->head) q->tail = NULL;
+        pthread_mutex_unlock(&q->lock);
 
-        if (r->opcode == FUSE_READ_OP) {
+        if (wa->is_read) {
             uint32_t want = r->size > sizeof(buf) ? (uint32_t)sizeof(buf) : r->size;
-            ssize_t n = read(s->fd, buf, want);
+            ssize_t n = -1;
+            if (io_wait(s, POLLIN, "read") == 0) {
+                do { n = read(s->fd, buf, want); } while (n < 0 && errno == EINTR);
+            }
             if (n < 0) {
-                reply(r->unique, -errno, NULL, 0);
+                reply(r->unique, -EIO, NULL, 0);
             } else {
                 s->rx += (unsigned long)n;
                 // 호스트가 이 파이프에 처음으로 무언가 보낸 순간. 이 줄이 안 나오면
@@ -339,13 +391,22 @@ static void *worker_main(void *arg) {
                 }
                 reply(r->unique, 0, buf, (size_t)n);
             }
-        } else {  // FUSE_WRITE_OP
-            ssize_t n = write_all(s->fd, r->payload, r->size);
-            if (n < 0) {
-                reply(r->unique, -errno, NULL, 0);
+        } else {
+            size_t done = 0;
+            int failed = 0;
+            while (done < r->size) {
+                if (io_wait(s, POLLOUT, "write") != 0) { failed = 1; break; }
+                ssize_t n = write(s->fd, r->payload + done, r->size - done);
+                if (n > 0) { done += (size_t)n; continue; }
+                if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+                failed = 1;
+                break;
+            }
+            if (failed && done == 0) {
+                reply(r->unique, -EIO, NULL, 0);
             } else {
-                s->tx += (unsigned long)n;
-                struct fuse_write_out wo = {.size = (uint32_t)n, .padding = 0};
+                s->tx += (unsigned long)done;
+                struct fuse_write_out wo = {.size = (uint32_t)done, .padding = 0};
                 reply(r->unique, 0, &wo, sizeof(wo));
             }
         }
@@ -357,13 +418,14 @@ static void *worker_main(void *arg) {
 
 // 큐에 넣기만 하고 즉시 돌아온다. 디스패처가 여기서 블록되면 다른 파이프가 굶는다.
 static void enqueue(struct pipe_slot *s, struct request *r) {
-    pthread_mutex_lock(&s->lock);
+    struct req_queue *q = (r->opcode == FUSE_READ_OP) ? &s->rq : &s->wq;
+    pthread_mutex_lock(&q->lock);
     r->next = NULL;
-    if (s->tail) s->tail->next = r;
-    else s->head = r;
-    s->tail = r;
-    pthread_cond_signal(&s->cv);
-    pthread_mutex_unlock(&s->lock);
+    if (q->tail) q->tail->next = r;
+    else q->head = r;
+    q->tail = r;
+    pthread_cond_signal(&q->cv);
+    pthread_mutex_unlock(&q->lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +452,7 @@ static int slot_alloc(void) {
     }
     if (port < 0) { pthread_mutex_unlock(&g_pool_lock); return -2; }
 
-    int fd = open(g_ports[port], O_RDWR | O_CLOEXEC);
+    int fd = open(g_ports[port], O_RDWR | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) {
         // 포트가 다른 프로세스에 잡혀 있으면 EBUSY. 그 포트는 쓰지 않도록 표시하고
         // 다음 open 에서 다른 포트를 고르게 한다.
@@ -406,11 +468,16 @@ static int slot_alloc(void) {
     s->fd = fd;
     s->port_index = port;
     s->slot_no = idx + 1;
-    pthread_mutex_init(&s->lock, NULL);
-    pthread_cond_init(&s->cv, NULL);
+    pthread_mutex_init(&s->rq.lock, NULL);
+    pthread_cond_init(&s->rq.cv, NULL);
+    pthread_mutex_init(&s->wq.lock, NULL);
+    pthread_cond_init(&s->wq.cv, NULL);
+    s->rd_arg.s = s; s->rd_arg.is_read = 1;
+    s->wr_arg.s = s; s->wr_arg.is_read = 0;
     g_port_taken[port] = 1;
 
-    if (pthread_create(&s->worker, NULL, worker_main, s) != 0) {
+    if (pthread_create(&s->rd_worker, NULL, worker_main, &s->rd_arg) != 0 ||
+        pthread_create(&s->wr_worker, NULL, worker_main, &s->wr_arg) != 0) {
         close(fd);
         g_port_taken[port] = 0;
         s->in_use = 0;
@@ -418,16 +485,27 @@ static int slot_alloc(void) {
         return -4;
     }
     pthread_mutex_unlock(&g_pool_lock);
-    put("pipe %d -> %s", idx + 1, g_ports[port]);
+
+    // 호스트가 이 포트에 붙어 있는가. virtio_console 은 host_connected 일 때만
+    // POLLOUT 을 준다. 붙어 있지 않으면 첫 write 부터 영원히 못 나가므로, 그 사실을
+    // 파이프를 나눠주는 순간에 알아야 한다.
+    struct pollfd probe = {.fd = fd, .events = POLLOUT, .revents = 0};
+    int ready = poll(&probe, 1, 0) > 0 && (probe.revents & POLLOUT);
+    put("pipe %d -> %s (호스트 %s)", idx + 1, g_ports[port],
+        ready ? "연결됨" : "연결 안 됨 - 이 파이프로 보내는 것은 막힌다");
     return idx;
 }
 
 static void slot_free(struct pipe_slot *s) {
-    pthread_mutex_lock(&s->lock);
-    s->stop = 1;
-    pthread_cond_signal(&s->cv);
-    pthread_mutex_unlock(&s->lock);
-    pthread_join(s->worker, NULL);
+    struct req_queue *qs[2] = { &s->rq, &s->wq };
+    for (int i = 0; i < 2; i++) {
+        pthread_mutex_lock(&qs[i]->lock);
+        qs[i]->stop = 1;
+        pthread_cond_signal(&qs[i]->cv);
+        pthread_mutex_unlock(&qs[i]->lock);
+    }
+    pthread_join(s->rd_worker, NULL);
+    pthread_join(s->wr_worker, NULL);
 
     pthread_mutex_lock(&g_pool_lock);
     close(s->fd);

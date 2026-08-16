@@ -573,9 +573,9 @@ jobs:
 
             # 맨 마지막. SurfaceFlinger 가 죽은 것인지 멈춘 것인지, 멈췄다면 파이프를 쥔
             # 채인지가 여기서 갈린다. host replied 줄이 없으면 호스트가 답을 안 하는 것이다.
-            echo "  ########## SurfaceFlinger 는 죽었나 멈췄나 (지금 보려는 것) ##########"
-            grep -aE "wd .*watch |pipe [0-9]+: host replied|pipe [0-9]+ closed|Waiting for service SurfaceFlinger" "$f" \
-              | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -24 \
+            echo "  ########## 파이프가 막힌 자리 (지금 보려는 것) ##########"
+            grep -aE "wd .*watch |pipe [0-9]+ ->|pipe [0-9]+: |pipe [0-9]+ closed|Waiting for service SurfaceFlinger" "$f" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -28 \
               || echo "  (해당 없음)"
             echo "  --- 부팅 완료 여부 ---"
             grep -aE "boot_progress_|Boot is finished|BOOT_COMPLETED|ActivityManager: Displayed|WindowManager|SystemUI|Launcher" "$f" \

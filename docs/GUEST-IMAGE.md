@@ -672,6 +672,43 @@ ServiceManager: Waiting for service SurfaceFlinger...   (3분 35초 동안 계�
 > 찍도록 넣었습니다(7.5). 다음 로그는 "죽었나 멈췄나"와 "호스트가 답하나"를 직접
 > 말해 줍니다.
 
+### 7.8 멈춘 것은 SurfaceFlinger 가 아니라 우리 데몬이었습니다
+
+감시자를 넣은 다음 라운드에서 답이 나왔습니다:
+
+```
+init.wrapper: wd t=20s  watch p147 surfaceflinger S w=fuse_simple_request s=0 pipes=2
+init.wrapper: wd t=40s  watch p147 surfaceflinger S w=fuse_simple_request s=0 pipes=2
+init.wrapper: wd t=100s watch p147 surfaceflinger S w=fuse_simple_request s=0 pipes=2
+```
+
+PID 가 100초 동안 그대로입니다 — **죽고 재시작하는 것이 아니라 멈춰 있습니다.** 그리고
+멈춘 자리가 `fuse_simple_request` 인데, 그건 커널 FUSE 클라이언트가 **유저스페이스
+데몬의 응답을 기다리는** 함수입니다. 호스트 렌더러가 아니라 `qemu_piped` 가 답을 안
+하고 있었습니다. 파이프는 두 개 쥐었고, `host replied` 는 한 번도 안 나왔습니다.
+
+데몬 쪽 잘못이 둘이었습니다.
+
+**(a) 읽기가 쓰기를 막습니다.** 파이프당 워커 하나에 FIFO 큐 하나였습니다. 호스트가
+아직 보낼 것이 없으면 `read` 가 블록되고, 그 뒤에 들어온 `write` 는 영영 차례가 오지
+않습니다. 진짜 goldfish pipe 는 같은 파이프에 읽기와 쓰기가 동시에 되고 emugl 도
+그렇게 씁니다. 이제 파이프마다 읽기 워커와 쓰기 워커를 따로 둡니다.
+
+**(b) 블로킹 fd 라 멈추면 아무 말도 못 합니다.** `virtio_console` 은 호스트가 그
+포트에 붙어 있지 않으면 `write` 를 무한정 재웁니다. 호스트가 안 붙은 것과 붙었는데
+조용한 것은 원인이 정반대인데 둘 다 똑같이 조용했습니다. 이제 포트를 `O_NONBLOCK` 으로
+열고 `poll` 로 기다리며, 5초 넘게 못 나가면 어느 쪽인지 적습니다:
+
+```
+pipe 3: write 가 5초째 대기 중 (호스트가 이 포트에 붙어 있지 않다)
+pipe 3: read 가 5초째 대기 중 (호스트가 조용하다)
+```
+
+파이프를 나눠주는 순간에도 `POLLOUT` 을 한 번 봐서 기록합니다 —
+`pipe 3 -> /dev/vport3p3 (호스트 연결됨)` 인지 `(호스트 연결 안 됨)` 인지.
+`virtio_console` 이 `host_connected` 일 때만 `POLLOUT` 을 주기 때문에 이것이
+"앱이 이 소켓에 실제로 붙었는가"에 대한 정확한 답입니다.
+
 ### 7.6 healthd 를 껐던 것이 부팅을 막고 있었습니다
 
 그래픽이 전부 붙은 뒤에도 화면은 검은 채였습니다. 폰 로그를 끝까지 받아 보니 이유가
