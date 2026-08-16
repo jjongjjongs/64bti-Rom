@@ -55,9 +55,19 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private static final int FRAME_TICK_LIMIT = 8;
     /**
      * Number of virtio-serial pipes wired between host and guest. jadx had collapsed this into
-     * FRAME_TICK_LIMIT because both happen to be 8; they are unrelated.
+     * FRAME_TICK_LIMIT because both happened to be 8; they are unrelated.
+     *
+     * <p>Eight was not enough. One goldfish pipe is one virtio-serial port, and a normal boot
+     * already needs five before any app runs: qemud:boot-properties, qemud:adb, and one
+     * pipe:opengles each for SurfaceFlinger, bootanimation and system_server. Every process
+     * that renders wants its own, so a game adds at least one more.
+     *
+     * <p>The shortage only shows up on a fast boot. With /data already populated there is no
+     * dexopt, system_server starts around 13s instead of 56s, and everything overlaps instead
+     * of arriving spread out. Keep this in step with the loop in guest-image.yml.
+     * virtio-serial-device allows 31 ports, so 24 leaves room and stays clear of the limit.
      */
-    private static final int TRANSPORT_PIPE_COUNT = 8;
+    private static final int TRANSPORT_PIPE_COUNT = 24;
     private static final long GUEST_DIAGNOSTICS_DELAY_MS = 60_000L;
     /** Drop a one-line kernel cmdline here to override the default without rebuilding the app. */
     private static final String KERNEL_CMDLINE_FILE = "kernel_cmdline.txt";

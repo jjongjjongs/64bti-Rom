@@ -359,7 +359,10 @@ jobs:
                 -display none -no-reboot
                 -device virtio-gpu-device,xres=480,yres=800
                 -device virtio-serial-device)
-          for i in 0 1 2 3 4 5 6 7; do
+          # 개수는 GuestRunActivity.TRANSPORT_PIPE_COUNT 와 맞춰야 한다. 8 은 모자란다 —
+          # boot-properties, adb, SurfaceFlinger, bootanimation, system_server 만으로
+          # 다섯이고 렌더링하는 앱마다 자기 파이프가 하나씩 더 필요하다.
+          for i in $(seq 0 23); do
             ARGS+=(-chardev "socket,id=singlevmpipe$i,path=$BOOT/transport/pipe$i.sock,server=on,wait=off")
             ARGS+=(-device "virtserialport,chardev=singlevmpipe$i,name=org.singlevm.pipe.$i")
           done
@@ -371,7 +374,7 @@ jobs:
                  -device virtio-blk-device,drive=cache
                  -drive "if=none,id=userdata,format=raw,file=$WORK/userdata.img"
                  -device virtio-blk-device,drive=userdata
-                 -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on qemu=1 qemu.gles=1 androidboot.console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder rdinit=/init.wrapper root=/dev/ram0 rw")
+                 -append "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel printk.devkmsg=on qemu=1 qemu.gles=1 androidboot.console=ttyAMA0 androidboot.hardware=ranchu androidboot.selinux=permissive binder.devices=binder,hwbinder,vndbinder singlevm.pipetest=1 rdinit=/init.wrapper root=/dev/ram0 rw")
 
           # 게스트가 vdc 를 쓰기 금지로 본다면 그 원인이 호스트 쪽일 수 있다.
           # 권한과 QEMU 가 읽은 형식을 부팅 직전에 남긴다.
@@ -530,7 +533,13 @@ jobs:
             # 전송로 검증: 게스트가 보낸 바이트가 호스트 소켓까지 왔는가.
             echo "  --- goldfish pipe 전송로 (호스트 소켓) ---"
             if [ -s /tmp/boot/pipe-listener.log ]; then
-              head -24 /tmp/boot/pipe-listener.log
+              # 연결됨 줄은 이제 24개라 그것만으로 화면이 찬다. 실제로 알고 싶은 것은
+              # 어떤 서비스가 어느 소켓에 붙었는가이므로 헤더 줄만 뽑고 나머지는 센다.
+              grep -a "서비스 헤더" /tmp/boot/pipe-listener.log | head -16 \
+                || echo "  (서비스 헤더 없음 - 게스트가 아무 파이프도 안 열었다)"
+              printf '  연결 %s개, 헤더 %s개\n' \
+                "$(grep -ac "연결됨" /tmp/boot/pipe-listener.log)" \
+                "$(grep -ac "서비스 헤더" /tmp/boot/pipe-listener.log)"
             else
               echo "  (청취기 출력 없음)"
             fi

@@ -627,10 +627,50 @@ CI 와의 결정적 차이는 **파이프가 닫혔다 다시 열린다**는 것
 `pipe:opengles` 가 열린 채 영영 멈춰 있었습니다(답하는 쪽이 없으니까). 폰에서는 4번이
 반납됐다 재사용되고 6번도 돌았습니다. 반대쪽이 실제로 응답하고 있다는 뜻입니다.
 
-> 포트 여유에 관한 메모: 풀은 8개고 `pipetest` 가 부팅 중 가장 붐비는 5초 동안 3개를
-> 잡습니다. 이번엔 문제가 없었지만(실제 클라이언트는 4·5·6번을 받았습니다) 렌더링하는
-> 프로세스마다 자기 파이프가 필요하므로, 앱까지 돌리기 시작하면 `TRANSPORT_PIPE_COUNT`
-> (`GuestRunActivity`) 를 올려야 할 수 있습니다.
+### 7.7 포트 여덟 개로는 모자랍니다
+
+healthd 를 고친 뒤 부팅은 한 관문 더 갔다가 여기서 멈췄습니다:
+
+```
+ServiceManager: Waiting for service SurfaceFlinger...   (3분 35초 동안 계속)
+```
+
+그 구간 내내 `qemu_piped: pipe N -> ...` 가 **한 줄도** 없습니다. 아무도 파이프를 새로
+열지 않는다는 뜻이라, SurfaceFlinger 가 죽고 재시도하는 모습은 아닙니다.
+
+앞선 부팅(02:03)에서는 같은 이미지로 SurfaceFlinger 가 정상 등록됐습니다. 차이는
+**부팅 속도** 하나였습니다:
+
+| | 02:03 (성공) | 02:44 (멈춤) |
+|---|---|---|
+| `/data` | 비어 있음, dexopt 실행 | 이미 채워짐 |
+| system_server 시작 | 56초 | **13.6초** |
+
+느린 부팅에서는 파이프 사용자들이 시간축에 흩어지고, 빠른 부팅에서는 전부 겹칩니다.
+그리고 세어 보면 여유가 정확히 0 입니다:
+
+| 파이프 | 쓰는 쪽 |
+|---|---|
+| `qemud:boot-properties` | qemu-props |
+| `qemud:adb:5555` | adbd |
+| `opengles` | SurfaceFlinger |
+| `opengles` | bootanimation |
+| `opengles` | system_server |
+| ×3 | `pipetest` (부팅 중 가장 붐비는 5초) |
+
+여덟 개 중 여덟 개입니다. 게임 프로세스는 자리가 없습니다. 두 가지를 고쳤습니다:
+
+- **`pipetest` 는 CI 에서만 돕니다.** 커널 커맨드라인에 `singlevm.pipetest=1` 이 있을
+  때만 동작하고, CI 는 붙이고 앱은 붙이지 않습니다. 검증은 그대로 하면서 폰에서는
+  포트를 하나도 쓰지 않습니다.
+- **포트를 8 → 24 로 올렸습니다.** `GuestRunActivity.TRANSPORT_PIPE_COUNT` 와
+  `guest-image.yml` 의 루프를 같이 고쳐야 합니다. `virtio-serial-device` 는 31개까지
+  받으므로 24는 한계에서 떨어져 있고, 데몬의 `MAX_PIPES` 는 이미 32입니다.
+
+> 이것이 원인이라고 확정된 것은 아닙니다. 그래서 같은 라운드에 감시자가
+> `wd ... watch surfaceflinger ... pipes=N` 을, 데몬이 `pipe N: host replied` 를
+> 찍도록 넣었습니다(7.5). 다음 로그는 "죽었나 멈췄나"와 "호스트가 답하나"를 직접
+> 말해 줍니다.
 
 ### 7.6 healthd 를 껐던 것이 부팅을 막고 있었습니다
 

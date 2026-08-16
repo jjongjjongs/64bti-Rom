@@ -39,8 +39,42 @@ static void put(const char *fmt, ...) {
     (void)unused;
 }
 
+// 이 시험은 CI 에서만 돈다.
+//
+// 파이프 세 개를 5초 동안 쥐는데, 하필 그 5초가 부팅에서 가장 붐비는 구간이다. 포트는
+// 여덟 개뿐이고 실제 사용자는 boot-properties, adb, SurfaceFlinger, bootanimation,
+// system_server 로 이미 다섯이다 — 시험까지 합치면 정확히 여덟, 여유가 0 이다.
+//
+// 느린 첫 부팅(dexopt 가 도는)에서는 이것들이 시간축에 흩어져서 문제가 없었다. 그런데
+// /data 가 채워진 뒤의 두 번째 부팅은 system_server 가 13초에 뜬다(실측: 첫 부팅 56초).
+// 전부 좁은 구간에 몰리므로 경합이 실제로 일어날 수 있다.
+//
+// 그래서 커널 커맨드라인에 표시가 있을 때만 돈다. CI 는 그 표시를 붙이고 앱은 붙이지
+// 않으므로, 검증은 그대로 하면서 폰에서는 포트를 한 개도 쓰지 않는다.
+#define ENABLE_FLAG "singlevm.pipetest=1"
+
+static int enabled(void) {
+    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        // 못 읽으면 돌지 않는다. 포트를 괜히 빼앗는 쪽보다 시험을 건너뛰는 쪽이 낫다.
+        put("SKIP /proc/cmdline 을 읽을 수 없다 (%s)", strerror(errno));
+        return 0;
+    }
+    char cmdline[2048];
+    ssize_t n = read(fd, cmdline, sizeof(cmdline) - 1);
+    close(fd);
+    if (n <= 0) { put("SKIP /proc/cmdline 이 비어 있다"); return 0; }
+    cmdline[n] = '\0';
+    if (!strstr(cmdline, ENABLE_FLAG)) {
+        put("SKIP %s 가 없다 - 포트를 쓰지 않고 끝낸다", ENABLE_FLAG);
+        return 0;
+    }
+    return 1;
+}
+
 int main(void) {
     g_log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (!enabled()) return 0;
 
     // 실제 클라이언트가 쓰는 것과 같은 이름들. 호스트 로그에서 어느 파이프인지 구분된다.
     static const char *services[N_PIPES] = {
