@@ -493,10 +493,6 @@ jobs:
               echo "  --- QEMU 경고 ---"; head -c 1200 "$q"; echo
             done
             # 전송로 검증: 게스트가 보낸 바이트가 호스트 소켓까지 왔는가.
-            echo "  --- qemu_piped / pipetest (게스트) ---"
-            grep -aE "qemu_piped:|pipetest:" "$f" | sed 's/^\[[0-9. ]*\] //' \
-              | awk '!d[$0]++' | head -20 || echo "  (출력 없음)"
-
             echo "  --- goldfish pipe 전송로 (호스트 소켓) ---"
             if [ -s /tmp/boot/pipe-listener.log ]; then
               head -24 /tmp/boot/pipe-listener.log
@@ -514,4 +510,10 @@ jobs:
             # (패닉, init 의 리부트 요청 등). 필터를 거치지 않은 원본이어야 한다.
             echo "  --- 시리얼 로그 원본 마지막 줄 ---"
             tail -n 40 "$f" | sed 's/^\[[0-9. ]*\] //' | awk '!t[$0]++' | tail -22
+
+            # 맨 마지막에 둔다. 지금 알아내야 하는 것이 이것 하나뿐인데, 앞쪽에 두면
+            # 로그 뷰어의 표시 한계에 계속 잘려서 세 번을 놓쳤다.
+            echo "  ########## qemu_piped / pipetest (지금 보려는 것) ##########"
+            grep -aE "qemu_piped:|pipetest:" "$f" | sed 's/^\[[0-9. ]*\] //' \
+              | awk '!d[$0]++' | head -24 || echo "  (출력 없음 - 데몬이 아예 안 떴다)"
           done
