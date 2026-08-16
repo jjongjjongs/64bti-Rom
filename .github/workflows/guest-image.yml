@@ -533,10 +533,11 @@ jobs:
             # 전송로 검증: 게스트가 보낸 바이트가 호스트 소켓까지 왔는가.
             echo "  --- goldfish pipe 전송로 (호스트 소켓) ---"
             if [ -s /tmp/boot/pipe-listener.log ]; then
-              # 연결됨 줄은 이제 24개라 그것만으로 화면이 찬다. 실제로 알고 싶은 것은
-              # 어떤 서비스가 어느 소켓에 붙었는가이므로 헤더 줄만 뽑고 나머지는 센다.
-              grep -a "서비스 헤더" /tmp/boot/pipe-listener.log | head -16 \
-                || echo "  (서비스 헤더 없음 - 게스트가 아무 파이프도 안 열었다)"
+              # "연결됨" 줄은 이제 24개라 그것만으로 화면이 찬다. 그것만 빼고 나머지는
+              # 다 본다 — 특히 헤더 뒤에 오는 바이트의 16진수가 중요하다. 한 번은 이걸
+              # 헤더 줄만 뽑도록 걸러 놓는 바람에, 덤프를 넣어놓고도 못 봤다.
+              grep -av "연결됨" /tmp/boot/pipe-listener.log | head -20 \
+                || echo "  (출력 없음 - 게스트가 아무 파이프도 안 열었다)"
               printf '  연결 %s개, 헤더 %s개\n' \
                 "$(grep -ac "연결됨" /tmp/boot/pipe-listener.log)" \
                 "$(grep -ac "서비스 헤더" /tmp/boot/pipe-listener.log)"

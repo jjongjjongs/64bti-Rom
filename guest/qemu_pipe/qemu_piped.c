@@ -256,6 +256,16 @@ static int g_port_count = 0;
 static struct pipe_slot g_slots[MAX_PIPES];
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// /dev/vport3p12 에서 끝의 12 를 뽑는다. 이름 전체가 아니라 이 숫자가 호스트 소켓
+// 번호와 대응한다(vport<컨트롤러>p<번호>, 번호는 1부터).
+static long port_num(const char *path) {
+    const char *p = strrchr(path, 'p');
+    if (!p) return -1;
+    char *end = NULL;
+    long n = strtol(p + 1, &end, 10);
+    return (end && *end == '\0') ? n : -1;
+}
+
 static int scan_ports(void) {
     DIR *d = opendir("/dev");
     if (!d) return 0;
@@ -266,11 +276,15 @@ static int scan_ports(void) {
         g_port_count++;
     }
     closedir(d);
-    // 이름순으로 정렬해서 배정 순서를 예측 가능하게 만든다. 호스트 소켓 번호와
+    // 번호순으로 정렬해서 배정 순서를 예측 가능하게 만든다. 호스트 소켓 번호와
     // 대응이 맞아야 로그를 읽을 때 헷갈리지 않는다.
+    //
+    // strcmp 로 하면 안 된다. 포트가 여덟 개일 때는 사전순과 번호순이 같아서 문제가
+    // 없었는데, 24개로 늘리자 vport3p1, vport3p10, vport3p11 ... 순이 됐다(실측).
+    // 파이프 1번이 소켓 0번, 2번이 소켓 9번에 붙는 식이라 로그를 읽을 수 없었다.
     for (int i = 0; i < g_port_count; i++) {
         for (int j = i + 1; j < g_port_count; j++) {
-            if (strcmp(g_ports[j], g_ports[i]) < 0) {
+            if (port_num(g_ports[j]) < port_num(g_ports[i])) {
                 char tmp[288];
                 memcpy(tmp, g_ports[i], sizeof(tmp));
                 memcpy(g_ports[i], g_ports[j], sizeof(tmp));
