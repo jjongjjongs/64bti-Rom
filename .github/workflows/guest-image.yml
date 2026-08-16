@@ -557,9 +557,16 @@ jobs:
             # healthd 가 없으면 BatteryService 가 NPE 로 죽고, system_server 가 통째로
             # 내려가고, zygote 가 따라 죽고, 전부 다시 시작한다. 화면은 영원히 검다.
             # 그래픽이 다 붙은 뒤에도 이것 때문에 부팅이 안 끝난다.
-            echo "  ########## healthd / system_server (지금 보려는 것) ##########"
+            echo "  --- healthd / system_server ---"
             grep -aE "healthd|BatteryService|batteryproperties|IBatteryProperties|FATAL EXCEPTION IN SYSTEM|Failure starting system services|am_crash|Exit zygote because" "$f" \
-              | sed 's/^\[[0-9. ]*\] //' | awk '!h[$0]++' | head -20 \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!h[$0]++' | head -12 \
+              || echo "  (해당 없음)"
+
+            # 맨 마지막. SurfaceFlinger 가 죽은 것인지 멈춘 것인지, 멈췄다면 파이프를 쥔
+            # 채인지가 여기서 갈린다. host replied 줄이 없으면 호스트가 답을 안 하는 것이다.
+            echo "  ########## SurfaceFlinger 는 죽었나 멈췄나 (지금 보려는 것) ##########"
+            grep -aE "wd .*watch |pipe [0-9]+: host replied|pipe [0-9]+ closed|Waiting for service SurfaceFlinger" "$f" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!w[$0]++' | tail -24 \
               || echo "  (해당 없음)"
             echo "  --- 부팅 완료 여부 ---"
             grep -aE "boot_progress_|Boot is finished|BOOT_COMPLETED|ActivityManager: Displayed|WindowManager|SystemUI|Launcher" "$f" \

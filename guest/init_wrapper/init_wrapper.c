@@ -34,9 +34,12 @@
 // 감시자(watchdog) 주기. 부팅이 조용해졌을 때 "멈춘 것"인지 "그냥 콘솔에 안 찍는 것"인지
 // 구분할 방법이 이것뿐이다.
 #define WD_PERIOD_MS 5000
-#define WD_MAX_TICKS 90
+#define WD_MAX_TICKS 240
 #define WD_TABLE_EVERY 12
 #define WD_MAX_PROCS 64
+// 이름으로 계속 지켜볼 프로세스. 매 틱 전체 표를 뜨는 것은 너무 시끄럽고, 정작 궁금한
+// 것은 늘 이 몇 개다 — 지금은 "SurfaceFlinger 가 죽은 것인가 멈춘 것인가"가 그렇다.
+#define WD_WATCH_EVERY 4
 
 static int g_log = -1;
 
@@ -231,6 +234,69 @@ static int is_pid_dir(const char *name) {
     return name[0] != '\0';
 }
 
+// 이름으로 PID 를 찾는다. 프로세스는 재시작하며 PID 가 바뀌므로 이름이 유일한 손잡이다.
+static int wd_find_pid(const char *want, char *pid_out, size_t len) {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (!is_pid_dir(e->d_name)) continue;
+        char path[64], comm[64];
+        snprintf(path, sizeof(path), "/proc/%s/comm", e->d_name);
+        if (read_small(path, comm, sizeof(comm)) <= 0) continue;
+        chomp(comm);
+        if (strcmp(comm, want) != 0) continue;
+        snprintf(pid_out, len, "%s", e->d_name);
+        found = 1;
+        break;
+    }
+    closedir(d);
+    return found;
+}
+
+// 이 프로세스가 /dev/qemu_pipe 를 몇 개 들고 있는가. 파이프를 쥔 채 멈춰 있는 것과
+// 파이프를 아예 못 얻은 것은 원인이 정반대인데, 로그만 봐서는 둘 다 "조용함"이다.
+static int wd_pipe_fds(const char *pid) {
+    char dirpath[64];
+    snprintf(dirpath, sizeof(dirpath), "/proc/%s/fd", pid);
+    DIR *d = opendir(dirpath);
+    if (!d) return -1;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        char link[96], target[160];
+        snprintf(link, sizeof(link), "%s/%s", dirpath, e->d_name);
+        ssize_t k = readlink(link, target, sizeof(target) - 1);
+        if (k <= 0) continue;
+        target[k] = '\0';
+        if (strstr(target, "qemu_pipe")) n++;
+    }
+    closedir(d);
+    return n;
+}
+
+// 관심 프로세스들의 상태를 한 줄씩. 상태 문자가 답을 준다:
+//   없음 → 죽었고 아직 안 올라옴 (또는 영영 안 옴)
+//   S/D + wchan → 그 자리에서 기다리는 중. syscall 번호가 무엇을 하다 멈췄는지 말해준다
+//   R → 돌고 있음
+// pipes= 가 1 이상이면 goldfish pipe 를 쥐고 있다는 뜻이고, 그 상태로 멈춰 있으면
+// 호스트가 답을 안 하고 있는 것이다.
+static void wd_watch(int secs) {
+    static const char *names[] = { "surfaceflinger", "system_server", "bootanimation" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char pid[16];
+        if (!wd_find_pid(names[i], pid, sizeof(pid))) {
+            put_fmt("wd t=%ds watch %s: not running", secs, names[i]);
+            continue;
+        }
+        char line[224];
+        wd_proc_line(pid, line, sizeof(line));
+        put_fmt("wd t=%ds watch %s pipes=%d", secs, line, wd_pipe_fds(pid));
+    }
+}
+
 static void wd_table(int secs) {
     DIR *d = opendir("/proc");
     if (!d) { put_fmt("wd t=%ds procs: (no /proc)", secs); return; }
@@ -379,6 +445,9 @@ static void watchdog_main(void) {
             probed = 1;
             probe_data_mount();
         }
+
+        // /data 가 붙은 뒤부터가 그래픽·system_server 구간이다. 그 전에는 볼 것이 없다.
+        if (data_seen && tick % WD_WATCH_EVERY == 0) wd_watch(secs);
 
         int every = data_seen ? WD_TABLE_EVERY * 4 : WD_TABLE_EVERY;
         if (tick % every == 0) wd_table(secs);

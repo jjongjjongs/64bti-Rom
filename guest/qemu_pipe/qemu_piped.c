@@ -221,6 +221,11 @@ struct pipe_slot {
     pthread_cond_t cv;
     struct request *head, *tail;
     int stop;
+    // 바이트 수를 세는 이유: "호스트가 답을 하는가"가 지금 가장 중요한 질문인데,
+    // 답하지 않는 것과 게스트가 애초에 안 보내는 것이 로그상 똑같이 조용하다.
+    unsigned long tx, rx;   // tx=게스트→호스트, rx=호스트→게스트
+    int rx_announced;       // 첫 응답만 한 번 알린다
+    int slot_no;            // 로그에 찍을 1-기반 번호
 };
 
 static char g_ports[MAX_PIPES][288];
@@ -322,13 +327,24 @@ static void *worker_main(void *arg) {
         if (r->opcode == FUSE_READ_OP) {
             uint32_t want = r->size > sizeof(buf) ? (uint32_t)sizeof(buf) : r->size;
             ssize_t n = read(s->fd, buf, want);
-            if (n < 0) reply(r->unique, -errno, NULL, 0);
-            else reply(r->unique, 0, buf, (size_t)n);
+            if (n < 0) {
+                reply(r->unique, -errno, NULL, 0);
+            } else {
+                s->rx += (unsigned long)n;
+                // 호스트가 이 파이프에 처음으로 무언가 보낸 순간. 이 줄이 안 나오면
+                // 게스트는 요청만 보내고 영원히 답을 기다리는 중이라는 뜻이다.
+                if (n > 0 && !s->rx_announced) {
+                    s->rx_announced = 1;
+                    put("pipe %d: host replied (%zd bytes)", s->slot_no, n);
+                }
+                reply(r->unique, 0, buf, (size_t)n);
+            }
         } else {  // FUSE_WRITE_OP
             ssize_t n = write_all(s->fd, r->payload, r->size);
             if (n < 0) {
                 reply(r->unique, -errno, NULL, 0);
             } else {
+                s->tx += (unsigned long)n;
                 struct fuse_write_out wo = {.size = (uint32_t)n, .padding = 0};
                 reply(r->unique, 0, &wo, sizeof(wo));
             }
@@ -389,6 +405,7 @@ static int slot_alloc(void) {
     s->in_use = 1;
     s->fd = fd;
     s->port_index = port;
+    s->slot_no = idx + 1;
     pthread_mutex_init(&s->lock, NULL);
     pthread_cond_init(&s->cv, NULL);
     g_port_taken[port] = 1;
@@ -415,7 +432,8 @@ static void slot_free(struct pipe_slot *s) {
     pthread_mutex_lock(&g_pool_lock);
     close(s->fd);
     g_port_taken[s->port_index] = 0;
-    put("pipe closed, %s freed", g_ports[s->port_index]);
+    put("pipe %d closed, %s freed (보냄 %lu, 받음 %lu 바이트)",
+        s->slot_no, g_ports[s->port_index], s->tx, s->rx);
     s->in_use = 0;
     pthread_mutex_unlock(&g_pool_lock);
 }
