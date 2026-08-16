@@ -350,7 +350,7 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
 | 8 | SurfaceFlinger | ✅ | abort 안 함. `/dev/qemu_pipe` 자리를 뺏고 나서 해결 (7.3, 7.3c) |
 | 9 | emugl 연결 | ✅ | 폰에서 SurfaceFlinger 가 `init()` 을 끝내고 `bootanim` 을 띄움 (7.3e). CI 는 답할 렌더러가 없어 여기서 멈춤 (7.3d) |
-| 10 | 부팅 완료 | ❔ | 폰 로그가 8.7초에서 끊겨 미확인 |
+| 10 | 부팅 완료 | ❌ | `system_server` 가 BatteryService 에서 죽음 — healthd 를 꺼 뒀던 것이 원인 (7.6) |
 | 11 | APK 전달·실행 | ❌ | 아직 없음. `EXTRA_APK_PATH` 는 부팅 경로에서 한 번도 안 쓰임 |
 
 ### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
@@ -631,6 +631,50 @@ CI 와의 결정적 차이는 **파이프가 닫혔다 다시 열린다**는 것
 > 잡습니다. 이번엔 문제가 없었지만(실제 클라이언트는 4·5·6번을 받았습니다) 렌더링하는
 > 프로세스마다 자기 파이프가 필요하므로, 앱까지 돌리기 시작하면 `TRANSPORT_PIPE_COUNT`
 > (`GuestRunActivity`) 를 올려야 할 수 있습니다.
+
+### 7.6 healthd 를 껐던 것이 부팅을 막고 있었습니다
+
+그래픽이 전부 붙은 뒤에도 화면은 검은 채였습니다. 폰 로그를 끝까지 받아 보니 이유가
+그래픽과 무관했습니다:
+
+```
+FATAL EXCEPTION IN SYSTEM PROCESS: main
+java.lang.RuntimeException: Failed to start service
+  com.android.server.BatteryService: onStart threw an exception
+Caused by: java.lang.NullPointerException: Attempt to invoke interface method
+  'void android.os.IBatteryPropertiesRegistrar.registerListener(...)'
+  on a null object reference
+    at com.android.server.BatteryService.onStart(BatteryService.java:191)
+...
+Zygote: Exit zygote because system server (1059) has terminated
+```
+
+`system_server` 가 죽으면 zygote 가 따라 죽고 init 이 전부 다시 시작합니다. 실측으로
+60초쯤마다 반복했고, WindowManager·SystemUI·런처는 시작조차 못 하므로 화면은 영원히
+검습니다. **부팅이 끝나지 않는 것이지 그리지 못하는 것이 아니었습니다.**
+
+`IBatteryPropertiesRegistrar` 를 등록하는 것은 **healthd** 인데, 조립 단계가 healthd
+서비스 블록을 통째로 주석 처리하고 있었습니다. 당시 근거는 이랬습니다:
+
+> healthd 는 `-machine virt` 에서 abort 한다. 배터리 UI 라 게임 구동에는 필요 없으므로
+> 서비스 자체를 끈다.
+
+앞 문장은 관측이었고 뒷 문장이 틀린 추론이었습니다. `BatteryService` 는 배터리 UI 가
+아니라 `SystemServer.startCoreServices()` 가 조건 없이 띄우는 코어 서비스입니다.
+배터리를 포기한 것이 아니라 부팅을 포기한 셈이었습니다.
+
+**abort 하던 시점이 중요합니다.** healthd 를 끈 것은 바인더 32비트 ABI 를 고치기
+전(7.2)이고, 그때는 servicemanager 조차
+`Binder driver protocol does not match user space protocol!` 로 죽고 있었습니다.
+healthd 도 바인더로 서비스를 등록하므로 같은 이유로 죽었을 가능성이 큽니다. 그래서
+지금은 다시 켭니다.
+
+다만 `critical` 플래그는 뗍니다 — critical 서비스가 4분 안에 4번 죽으면 init 이
+recovery 로 리부트해서, 만약 아직도 abort 한다면 그 이유를 볼 수가 없습니다.
+
+> 교훈으로 남길 것: **"이 기능은 필요 없다"와 "이 서비스는 없어도 된다"는 다른
+> 말입니다.** 그리고 어떤 것을 껐다면, 그것이 죽던 원인을 나중에 고쳤을 때 다시
+> 켜 봐야 합니다. 이 건은 그 사이 열 몇 번의 부팅 동안 조용히 유효했습니다.
 
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 

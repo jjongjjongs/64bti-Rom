@@ -171,18 +171,39 @@ jobs:
           cp "$GITHUB_WORKSPACE/pipetest"   ./pipetest
           chmod 750 ./qemu_piped ./pipetest
 
-          # healthd 는 -machine virt 에서 abort 한다(TEST_POWER 를 넣어도 여전하므로
-          # 전원 장치 부재가 원인은 아니다). critical 만 떼었더니 무한 재시작하며
-          # 로그를 도배해 정작 그 뒤가 보이지 않았다. 배터리 UI 라 게임 구동에는
-          # 필요 없으므로 서비스 자체를 끈다.
+          # healthd 는 켜 둔다. 한동안 꺼 놨었는데, 그게 부팅을 막고 있었다.
+          #
+          # 껐던 이유는 "-machine virt 에서 abort 하고 배터리 UI 라 게임에는 필요 없다"
+          # 였다. 앞부분은 맞았고 뒷부분이 틀렸다. healthd 가 등록하는
+          # IBatteryPropertiesRegistrar 가 없으면 system_server 가 이렇게 죽는다:
+          #
+          #   FATAL EXCEPTION IN SYSTEM PROCESS: main
+          #   Failed to start service com.android.server.BatteryService: onStart threw
+          #   Caused by: java.lang.NullPointerException: Attempt to invoke interface
+          #     method 'void IBatteryPropertiesRegistrar.registerListener(...)' on a
+          #     null object reference at BatteryService.onStart(BatteryService.java:191)
+          #
+          # BatteryService 는 UI 가 아니라 startCoreServices() 가 무조건 띄우는 코어
+          # 서비스다. 없으면 부팅이 거기서 끝나고 zygote 까지 따라 죽어 무한 재시작한다
+          # (실측: 폰에서 60초쯤마다 반복, 화면은 계속 검음).
+          #
+          # 그때 healthd 가 abort 한 것은 바인더 32비트 ABI 를 고치기 전이라서일 가능성이
+          # 크다. 그 시기에는 servicemanager 도 같은 이유로 죽고 있었고, healthd 역시
+          # 바인더로 서비스를 등록한다.
+          #
+          # 다만 critical 은 뗀다. critical 서비스가 4분 안에 4번 죽으면 init 이 recovery
+          # 로 리부트해 버려서, 만약 아직도 abort 한다면 그 이유를 볼 수가 없다.
           if [ -f init.rc ]; then
             awk '
-              /^service[ \t]+healthd/ { inblk=1 }
-              /^service[ \t]/ && !/healthd/ { inblk=0 }
-              inblk { print "# [disabled] " $0; next }
+              /^service[ \t]+healthd/ { inblk=1; print; next }
+              /^service[ \t]/         { inblk=0 }
+              inblk && $1 == "critical" { print "    # [critical 제거] critical"; next }
               { print }
             ' init.rc > init.rc.new && mv init.rc.new init.rc
-            echo "init.rc healthd 블록:"; awk '/^service[ \t]+healthd/,/^$/' init.rc | head -6
+            echo "init.rc healthd 블록:"; awk '/^service[ \t]+healthd/,/^$/' init.rc | head -8
+            grep -q "^service[ \t]*healthd" init.rc \
+              || echo "::error::init.rc 에 healthd 서비스가 없다 - BatteryService 가 또 NPE 로 죽는다"
+            ls -l sbin/healthd 2>/dev/null || echo "::error::램디스크에 /sbin/healthd 가 없다"
 
             # ueventd 콜드부트 이후 안드로이드는 logcat 으로만 로그를 남긴다. 시리얼에는
             # 아무것도 안 나와서 "멈춘 것"과 "조용히 진행 중"이 구분되지 않는다.
@@ -317,7 +338,11 @@ jobs:
       - name: Smoke boot the guest under QEMU
         continue-on-error: true
         env:
-          BOOT_SECONDS: "420"
+          # 420 이면 모자란다. 러너에는 ARM32 용 KVM 이 없어 전부 TCG 로 도는데, 지난
+          # 런에서 zygote 가 뜬 시각이 400초였다 — system_server 가 시작하기도 전에
+          # 타임아웃이 걸린다. 지금 봐야 하는 것(BatteryService 가 healthd 를 찾는가)이
+          # 정확히 그 뒤에 있으므로 여유를 준다. 폰에서는 같은 지점이 56초였다.
+          BOOT_SECONDS: "720"
         run: |
           sudo apt-get install -y -qq qemu-system-arm
           WORK="$GITHUB_WORKSPACE/guest-out"
@@ -523,7 +548,21 @@ jobs:
 
             # 맨 마지막에 둔다. 지금 알아내야 하는 것이 이것 하나뿐인데, 앞쪽에 두면
             # 로그 뷰어의 표시 한계에 계속 잘려서 세 번을 놓쳤다.
-            echo "  ########## qemu_piped / pipetest (지금 보려는 것) ##########"
+            echo "  --- qemu_piped / pipetest ---"
             grep -aE "qemu_piped:|pipetest:" "$f" | sed 's/^\[[0-9. ]*\] //' \
-              | awk '!d[$0]++' | head -24 || echo "  (출력 없음 - 데몬이 아예 안 떴다)"
+              | awk '!d[$0]++' | head -16 || echo "  (출력 없음 - 데몬이 아예 안 떴다)"
+
+            # 맨 마지막에 둔다. 지금 알아내야 하는 것이 이것이다.
+            #
+            # healthd 가 없으면 BatteryService 가 NPE 로 죽고, system_server 가 통째로
+            # 내려가고, zygote 가 따라 죽고, 전부 다시 시작한다. 화면은 영원히 검다.
+            # 그래픽이 다 붙은 뒤에도 이것 때문에 부팅이 안 끝난다.
+            echo "  ########## healthd / system_server (지금 보려는 것) ##########"
+            grep -aE "healthd|BatteryService|batteryproperties|IBatteryProperties|FATAL EXCEPTION IN SYSTEM|Failure starting system services|am_crash|Exit zygote because" "$f" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!h[$0]++' | head -20 \
+              || echo "  (해당 없음)"
+            echo "  --- 부팅 완료 여부 ---"
+            grep -aE "boot_progress_|Boot is finished|BOOT_COMPLETED|ActivityManager: Displayed|WindowManager|SystemUI|Launcher" "$f" \
+              | sed 's/^\[[0-9. ]*\] //' | awk '!z[$0]++' | tail -14 \
+              || echo "  (여기까지 못 갔다)"
           done
