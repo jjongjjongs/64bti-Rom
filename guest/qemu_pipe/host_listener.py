@@ -32,6 +32,15 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def dump(data: bytes, limit: int = 64) -> str:
+    """바이트를 16진수와 읽을 수 있는 문자로 같이 보여준다."""
+    chunk = data[:limit]
+    hexed = " ".join(f"{b:02x}" for b in chunk)
+    text = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+    more = f" (+{len(data) - limit} bytes)" if len(data) > limit else ""
+    return f"hex[{hexed}] ascii[{text}]{more}"
+
+
 def watch(path: str) -> None:
     name = os.path.basename(path)
 
@@ -69,8 +78,14 @@ def watch(path: str) -> None:
                     text = repr(head[:32])
                 log(f"[{name}] *** 서비스 헤더: {text!r} ({len(data)} 바이트 수신) ***")
                 header_done = True
+                rest = data.split(b"\x00", 1)[1] if b"\x00" in data else b""
+                if rest:
+                    log(f"[{name}] 헤더 뒤 {dump(rest)}")
             elif total < 4096:
-                log(f"[{name}] +{len(data)} 바이트 (누적 {total})")
+                # 헤더 다음에 오는 것이 emugl 핸드셰이크다. 폰에서 호스트가 이 바이트를
+                # 받고도 답을 안 하는 상황이라(실측: 게스트가 60초 넘게 read 대기),
+                # 무엇을 보내는지 정확히 알아야 앱 쪽을 판단할 수 있다.
+                log(f"[{name}] +{len(data)} 바이트 (누적 {total}) {dump(data)}")
     except OSError as exc:
         log(f"[{name}] 오류: {exc} (총 {total} 바이트)")
 
