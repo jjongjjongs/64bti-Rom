@@ -496,6 +496,50 @@ virtio_console 은 포트당 동시 접속이 하나입니다(두 번째 open �
 호스트 렌더러 없이도 CI 에서 검증 가능합니다 — 게스트에서 파이프를 여러 개 열어
 서로 다른 서비스 이름을 쓰면, 청취기에 서로 다른 소켓으로 나타나야 합니다.
 
+### 7.3c 장치 노드가 "있으면서 없는" 상태 — 대상 없는 심볼릭 링크
+
+CUSE 데몬(`guest/qemu_pipe/qemu_piped.c`)은 정상적으로 떴고 커널과의 handshake 도
+성공했습니다:
+
+```
+qemu_piped: found 8 virtio-serial ports, first=/dev/vport3p1
+qemu_piped: CUSE_INIT ok (kernel 7.32, ours 7.26), device /dev/qemu_pipe
+```
+
+그런데 장치가 끝내 안 보였습니다. 같은 로그에 모순되는 두 줄이 있습니다:
+
+```
+qemu_piped: FAIL mknod /dev/qemu_pipe (507:0): File exists   ← 있다
+init.wrapper: wd dev: /dev/qemu_pipe MISSING                 ← 없다
+pipetest:    FAIL /dev/qemu_pipe never appeared after 60000ms
+```
+
+데몬 코드는 `stat()` 이 실패했을 때만 `mknod()` 를 부릅니다. 즉 `stat` 은 "없다",
+`mknod` 은 "있다"고 답했습니다. **둘 다 참일 수 있는 경우는 하나뿐입니다 — `stat` 은
+심볼릭 링크를 따라가고 `mknod` 은 따라가지 않으므로, 그 자리에 대상 없는 심볼릭
+링크가 있었던 것입니다.** `access(F_OK)` 도 링크를 따라가므로 감시자와 `pipetest` 도
+똑같이 "없다"고 봤습니다.
+
+유력한 출처는 안드로이드 쪽 `init.*.rc` 의 goldfish 호환 링크입니다 — 같은 로그에서
+`/dev/goldfish_pipe` 역시 MISSING 이고(우리 커널에는 goldfish 드라이버가 없습니다),
+링크 대상이 바로 그것이면 앞뒤가 맞습니다. 조립 단계가 램디스크 `.rc` 를 grep 해서
+`qemu_pipe|goldfish_pipe` 줄을 찍도록 했으니 다음 런에서 확정됩니다.
+
+> 그 grep 옆에 있던 `mount_all / on fs` 항목이 계속 `(없음)` 이었던 것도 같이
+> 고쳤습니다. 램디스크가 아니라 워크스페이스 최상위에서 `*.rc` 를 찾고 있었습니다 —
+> 없던 게 아니라 안 보고 있었습니다.
+
+**고친 방법: 자리를 원자적으로 뺏습니다.** 누가 링크를 걸었는지 캐는 대신,
+임시 이름으로 노드를 만들고 `rename()` 으로 덮어씁니다. `rename` 은 심볼릭 링크든
+낡은 노드든 조용히 대체하고, ueventd 가 같은 순간에 노드를 만들어도 경합이
+없습니다(`stat` 후 `mknod` 사이의 틈이 사라집니다). 덧붙여 데몬은
+
+- 무엇을 밀어냈는지 로그에 남기고(`이전: 심볼릭 링크 -> ... (대상 없음)`),
+- 만든 뒤 실제로 `open()` 해 보고,
+- 그 뒤로도 노드가 사라지는지 계속 지켜보다가 사라지면 다시 만듭니다.
+
+마지막 항목은 아직 관측된 적 없는 실패 방식(만들어졌다가 제거됨)에 대비한 것입니다.
+
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 
 부팅 로그에 계속 나오지만 진행을 막지 않는 것들입니다. 여기에 시간을 쓰지 마세요.

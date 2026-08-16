@@ -446,6 +446,32 @@ static int cuse_handshake(const struct fuse_in_header *in, const struct cuse_ini
     return 0;
 }
 
+// 경로에 무엇이 있는지 사람이 읽을 수 있게 적는다. 진단에만 쓴다.
+static void describe_path(const char *path, char *out, size_t len) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        snprintf(out, len, "없음 (%s)", strerror(errno));
+        return;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        char target[256];
+        ssize_t n = readlink(path, target, sizeof(target) - 1);
+        if (n < 0) { snprintf(out, len, "심볼릭 링크 (readlink 실패)"); return; }
+        target[n] = '\0';
+        // 링크가 가리키는 곳이 실제로 있는지가 핵심이다. 없으면 stat 은 실패하는데
+        // mknod 는 EEXIST 를 내서, 노드가 있는 것처럼도 없는 것처럼도 보인다.
+        snprintf(out, len, "심볼릭 링크 -> %s (%s)",
+                 target, access(path, F_OK) == 0 ? "대상 있음" : "대상 없음");
+        return;
+    }
+    if (S_ISCHR(st.st_mode)) {
+        snprintf(out, len, "문자 장치 %u:%u 권한 %04o",
+                 major(st.st_rdev), minor(st.st_rdev), st.st_mode & 07777);
+        return;
+    }
+    snprintf(out, len, "다른 무엇 (모드 %o)", st.st_mode);
+}
+
 // 장치 노드는 우리가 직접 만든다.
 //
 // 커널은 CUSE_INIT 응답을 받으면 /sys/class/cuse/<이름> 아래에 장치를 등록하고 uevent 를
@@ -454,42 +480,96 @@ static int cuse_handshake(const struct fuse_in_header *in, const struct cuse_ini
 // 파고드는 대신, 커널이 배정한 major:minor 를 sysfs 에서 읽어 우리가 mknod 한다.
 // 어차피 권한도 0666 으로 열어줘야 한다 — ueventd 기본값은 0600 root:root 인데
 // surfaceflinger 는 system 권한으로 돈다.
+//
+// 만드는 방식이 mknod 직접 호출이 아니라 "임시 이름으로 만들고 rename" 인 이유:
+//
+// 실측에서 stat 은 "없다"고 하는데 같은 자리에 한 mknod 가 EEXIST 로 실패했다. 둘 다
+// 참일 수 있는 경우는 하나뿐이다 — stat 은 링크를 따라가고 mknod 는 따라가지 않으므로,
+// 대상이 없는 심볼릭 링크가 그 자리에 있었던 것이다. 그리고 그 뒤로 access(F_OK) 가
+// 계속 실패해서 pipetest 도 SurfaceFlinger 도 장치가 없다고 봤다.
+//
+// 누가 그 링크를 만들었는지 캐는 것보다, 무엇이 있든 원자적으로 밀어내는 편이 낫다.
+// rename 은 심볼릭 링크든 낡은 노드든 대상을 조용히 대체하고, ueventd 가 같은 순간에
+// 노드를 만들어도 경합이 생기지 않는다.
+static int create_pipe_node(unsigned major_no, unsigned minor_no) {
+    char before[320];
+    describe_path(PIPE_DEV, before, sizeof(before));
+
+    const char *tmp = "/dev/.qemu_pipe.new";
+    unlink(tmp);
+    if (mknod(tmp, S_IFCHR | 0666, makedev(major_no, minor_no)) != 0) {
+        put("FAIL mknod %s (%u:%u): %s", tmp, major_no, minor_no, strerror(errno));
+        return -1;
+    }
+    // mknod 는 umask 를 먹으므로 권한을 다시 못박는다. surfaceflinger 는 root 가 아니다.
+    if (chmod(tmp, 0666) != 0) put("WARN chmod %s: %s", tmp, strerror(errno));
+    if (rename(tmp, PIPE_DEV) != 0) {
+        put("FAIL rename %s -> %s: %s", tmp, PIPE_DEV, strerror(errno));
+        unlink(tmp);
+        return -1;
+    }
+
+    char after[320];
+    describe_path(PIPE_DEV, after, sizeof(after));
+    put("created %s as %u:%u (이전: %s / 이후: %s)",
+        PIPE_DEV, major_no, minor_no, before, after);
+    return 0;
+}
+
 static void *device_watcher(void *unused) {
     (void)unused;
     const char *devattr = "/sys/class/cuse/" DEV_NAME "/dev";
+    unsigned major_no = 0, minor_no = 0;
+    int have = 0;
 
-    for (int i = 0; i < 600; i++) {
+    for (int i = 0; i < 600 && !have; i++) {
         int fd = open(devattr, O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) {
-            char buf[64] = {0};
-            ssize_t n = read(fd, buf, sizeof(buf) - 1);
-            close(fd);
-            unsigned major = 0, minor = 0;
-            if (n > 0 && sscanf(buf, "%u:%u", &major, &minor) == 2) {
-                struct stat st;
-                if (stat(PIPE_DEV, &st) != 0) {
-                    if (mknod(PIPE_DEV, S_IFCHR | 0666, makedev(major, minor)) != 0) {
-                        put("FAIL mknod %s (%u:%u): %s",
-                            PIPE_DEV, major, minor, strerror(errno));
-                        return NULL;
-                    }
-                    put("created %s as %u:%u", PIPE_DEV, major, minor);
-                }
-                if (chmod(PIPE_DEV, 0666) != 0) {
-                    put("WARN chmod %s: %s", PIPE_DEV, strerror(errno));
-                }
-                put("OK %s ready", PIPE_DEV);
-                return NULL;
-            }
-            put("WARN %s unreadable: %s", devattr, strerror(errno));
-            return NULL;
+        if (fd < 0) {
+            struct timespec ts = {0, 100 * 1000000L};
+            nanosleep(&ts, NULL);
+            continue;
         }
-        struct timespec ts = {0, 100 * 1000000L};
-        nanosleep(&ts, NULL);
+        char buf[64] = {0};
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0 && sscanf(buf, "%u:%u", &major_no, &minor_no) == 2) {
+            have = 1;
+            break;
+        }
+        put("WARN %s unreadable: %s", devattr, strerror(errno));
+        return NULL;
     }
-    // 여기까지 오면 커널이 장치를 아예 등록하지 않은 것이다 — CUSE_INIT 응답 자체를
-    // 커널이 거부했다는 뜻이라, ueventd 가 아니라 우리 응답을 봐야 한다.
-    put("FAIL %s never appeared - kernel did not register the CUSE device", devattr);
+    if (!have) {
+        // 커널이 장치를 아예 등록하지 않은 것이다 — CUSE_INIT 응답 자체를 커널이
+        // 거부했다는 뜻이라, ueventd 가 아니라 우리 응답을 봐야 한다.
+        put("FAIL %s never appeared - kernel did not register the CUSE device", devattr);
+        return NULL;
+    }
+
+    if (create_pipe_node(major_no, minor_no) != 0) return NULL;
+
+    // 열어봐야 진짜 되는 것이다. 노드가 있어도 major:minor 가 틀리면 여기서 걸린다.
+    int probe = open(PIPE_DEV, O_RDWR | O_CLOEXEC);
+    if (probe < 0) {
+        put("FAIL open %s: %s", PIPE_DEV, strerror(errno));
+    } else {
+        close(probe);
+        put("OK %s ready (열기 확인됨)", PIPE_DEV);
+    }
+
+    // 만들어 놓고 끝내지 않는다. 지금까지 못 본 실패 방식이 하나 남아 있다 — 노드가
+    // 생겼다가 나중에 사라지는 경우(ueventd 의 remove 처리 등). 한동안 지켜보다가
+    // 없어지면 다시 만들고, 그 사실을 로그에 남긴다.
+    for (int i = 0; i < 600; i++) {
+        struct timespec ts = {0, 500 * 1000000L};
+        nanosleep(&ts, NULL);
+        if (access(PIPE_DEV, F_OK) == 0) continue;
+        char gone[320];
+        describe_path(PIPE_DEV, gone, sizeof(gone));
+        put("WARN %s 가 %dms 만에 사라졌다 (%s) - 다시 만든다",
+            PIPE_DEV, (i + 1) * 500, gone);
+        if (create_pipe_node(major_no, minor_no) != 0) return NULL;
+    }
     return NULL;
 }
 

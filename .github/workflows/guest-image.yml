@@ -281,8 +281,18 @@ jobs:
                 | tr -s ' \t' '\n' | grep -E '\.so$' \
                 | grep -E 'gralloc|hwcomposer|EGL|GLES' || echo "   (해당 없음/못 읽음)"
             done
+            # 이 두 grep 은 램디스크 안을 봐야 한다. 여태 그냥 *.rc 로 두는 바람에
+            # 워크스페이스 최상위를 훑고 늘 "(없음)"만 찍었다 — 없는 게 아니라 안 봤던 것이다.
             echo "=== mount_all / on fs ==="
-            grep -n -E "mount_all|^on fs|^on post-fs|voldmanaged|encryptable" *.rc 2>/dev/null || echo "(없음)"
+            grep -n -E "mount_all|^on fs|^on post-fs|voldmanaged|encryptable" \
+              "$WORK"/rd/*.rc 2>/dev/null | sed "s|$WORK/rd/||" || echo "(없음)"
+            # /dev/qemu_pipe 를 누가 건드리는가. 실측에서 stat 은 "없다"는데 mknod 는
+            # EEXIST 였다 — 대상 없는 심볼릭 링크만이 둘 다를 만든다. 우리 CUSE 데몬이
+            # 만들기 전에 init 이 goldfish 용 링크를 걸어 두는지 여기서 확인한다
+            # (게스트 로그에서 /dev/goldfish_pipe 는 MISSING 이었다).
+            echo "=== qemu_pipe 를 건드리는 rc 줄 ==="
+            grep -n -E "qemu_pipe|goldfish_pipe" "$WORK"/rd/*.rc 2>/dev/null \
+              | sed "s|$WORK/rd/||" || echo "(램디스크 rc 에는 없음)"
             echo "=== 이미지 ==="
             for img in system cache userdata; do
               printf '%-12s label=%-10s %s\n' "$img.img" "$(e2label "$WORK/$img.img" 2>/dev/null)" \

@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define TAG "pipetest: "
@@ -51,7 +52,21 @@ int main(void) {
     int waited = 0;
     while (access(PIPE_DEV, F_OK) != 0) {
         if (waited >= 60000) {
-            put("FAIL %s never appeared after %dms", PIPE_DEV, waited);
+            // access 는 심볼릭 링크를 따라간다. 대상 없는 링크가 자리를 차지하고 있으면
+            // "없다"고 나오는데 정작 그 자리는 비어 있지 않다(실측). lstat 으로 구분한다.
+            struct stat st;
+            if (lstat(PIPE_DEV, &st) == 0) {
+                char target[256];
+                ssize_t n = readlink(PIPE_DEV, target, sizeof(target) - 1);
+                if (n >= 0) {
+                    target[n] = '\0';
+                    put("FAIL %s 는 대상 없는 심볼릭 링크다 -> %s", PIPE_DEV, target);
+                } else {
+                    put("FAIL %s 가 있는데 열리지 않는다 (모드 %o)", PIPE_DEV, st.st_mode);
+                }
+            } else {
+                put("FAIL %s never appeared after %dms", PIPE_DEV, waited);
+            }
             return 1;
         }
         usleep(200 * 1000);
