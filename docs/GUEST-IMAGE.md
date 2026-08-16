@@ -348,8 +348,8 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 5 | `/init` 이 넘겨받는다 | ✅ | `CONFIG_LSM` 에 selinux 가 없으면 selinuxfs 미등록 → 정책 로드 실패 |
 | 6 | `/system` `/cache` `/data` 마운트 | ✅ | **장치 순서** (아래 7.1) |
 | 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
-| 8 | SurfaceFlinger | ❌ | EGL ES2 config 없음 — goldfish pipe 필수 확정, 아래 7.3 |
-| 9 | emugl 연결 | 🔶 | 전송로는 검증됨(7.3b). 동시 파이프용 CUSE 데몬이 남음 |
+| 8 | SurfaceFlinger | ✅ | abort 안 함. `/dev/qemu_pipe` 자리를 뺏고 나서 해결 (7.3, 7.3c) |
+| 9 | emugl 연결 | 🔶 | 게스트가 `pipe:opengles` 를 열고 호스트 소켓까지 보냄. **CI 에는 답할 렌더러가 없어 여기까지가 한계** (7.3d) |
 
 ### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
 
@@ -539,6 +539,64 @@ pipetest:    FAIL /dev/qemu_pipe never appeared after 60000ms
 - 그 뒤로도 노드가 사라지는지 계속 지켜보다가 사라지면 다시 만듭니다.
 
 마지막 항목은 아직 관측된 적 없는 실패 방식(만들어졌다가 제거됨)에 대비한 것입니다.
+
+**확정된 결과** — 추정했던 출처가 그대로 맞았습니다:
+
+```
+qemu_piped: created /dev/qemu_pipe as 507:0
+  (이전: 심볼릭 링크 -> /dev/goldfish_pipe (대상 없음) / 이후: 문자 장치 507:0 권한 0666)
+```
+
+안드로이드 ranchu init 이 goldfish 커널 드라이버를 전제로 링크를 걸어 두는데, 우리
+커널에는 그 드라이버가 없습니다. 그래서 링크는 영영 대상을 얻지 못하고, 그 자리는
+비어 있지도 차 있지도 않은 상태로 남습니다.
+
+> 데몬이 노드를 만든 직후 스스로 `open()` 해보는 확인 절차가 있었는데 걷어냈습니다.
+> 커널은 `CUSE_INIT` **응답을 처리하는 도중에** 이미 sysfs 에 장치를 올리므로 그 틈에
+> 열면 `ENXIO` 가 납니다(실측: `FAIL open ...: No such device or address` — 노드는
+> 멀쩡했고 아직 살아나기 전이었을 뿐입니다). 열리는지는 `pipetest` 가 확인합니다.
+
+### 7.3d 동시 파이프 동작 확인 — 그리고 CI 의 한계선
+
+같은 런에서 다중화가 실제로 됐습니다. 게스트가 파이프를 세 개 동시에 열고 서로 다른
+이름을 썼고, 호스트에서 **서로 다른 소켓 세 개**로 각각 도착했습니다:
+
+```
+pipetest:    RESULT ok: 3/3 pipes opened concurrently
+qemu_piped:  pipe 1 -> /dev/vport3p1 / pipe 2 -> /dev/vport3p2 / pipe 3 -> /dev/vport3p3
+
+[pipe0.sock] *** 서비스 헤더: 'pipe:pipetest:one' ***
+[pipe1.sock] *** 서비스 헤더: 'pipe:pipetest:two' ***
+[pipe2.sock] *** 서비스 헤더: 'pipe:pipetest:three' ***
+```
+
+시험용만이 아니라 **실제 스택이 같은 장치를 씁니다.** 이어서 진짜 클라이언트들이
+각자 포트를 받아갔습니다:
+
+```
+[pipe3.sock] *** 서비스 헤더: 'pipe:qemud:adb:5555' ***
+[pipe4.sock] *** 서비스 헤더: 'pipe:qemud:boot-properties' ***
+[pipe5.sock] *** 서비스 헤더: 'pipe:opengles' ***   ← SurfaceFlinger
+[pipe5.sock] +4 바이트 (누적 18) / +20 바이트 (누적 38)
+```
+
+심볼릭 링크 방식이었다면 여기서 두 번째 open 이 `EBUSY` 로 끝났을 것입니다.
+
+**SurfaceFlinger 는 더 이상 abort 하지 않습니다.** `signal 6` 도, `failed to open
+framebuffer` 도 없습니다. 대신 이렇게 멈춰 있습니다:
+
+```
+ServiceManager: Waiting for service SurfaceFlinger...   (계속)
+```
+
+죽은 게 아니라 **기다리는 것**입니다 — `pipe:opengles` 로 handshake 를 보내 놓고 답을
+기다립니다. CI 의 청취기(`host_listener.py`)는 바이트를 받아 적기만 할 뿐 렌더러가
+아니라서 영원히 답하지 않습니다.
+
+**여기가 CI 로 갈 수 있는 끝입니다.** 답해야 하는 쪽은 앱이 들고 있는 실제 AOSP
+렌더러(`app/src/main/jniLibs/arm64-v8a/libemugl_host_android.so` — `emugl::RendererImpl`,
+`GLESv2Decoder`, `ColorBuffer`, `RenderWindow` 가 들어 있습니다)이고, 그건 폰에서만
+돕니다. 다음 검증은 폰에서 해야 합니다.
 
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 

@@ -548,14 +548,11 @@ static void *device_watcher(void *unused) {
 
     if (create_pipe_node(major_no, minor_no) != 0) return NULL;
 
-    // 열어봐야 진짜 되는 것이다. 노드가 있어도 major:minor 가 틀리면 여기서 걸린다.
-    int probe = open(PIPE_DEV, O_RDWR | O_CLOEXEC);
-    if (probe < 0) {
-        put("FAIL open %s: %s", PIPE_DEV, strerror(errno));
-    } else {
-        close(probe);
-        put("OK %s ready (열기 확인됨)", PIPE_DEV);
-    }
+    // 여기서 우리가 직접 open 해보지는 않는다. 커널은 CUSE_INIT 응답을 처리하는 도중에
+    // 이미 sysfs 에 장치를 올리므로, 이 스레드가 그 틈에 열면 ENXIO 가 난다(실측:
+    // "FAIL open /dev/qemu_pipe: No such device or address" — 노드는 멀쩡한데 아직
+    // 살아나기 전이었다). 게다가 자기 자신을 여는 것은 디스패처에게 FUSE_OPEN 을
+    // 보내는 일이라 굳이 할 이유가 없다. 열리는지는 pipetest 가 확인한다.
 
     // 만들어 놓고 끝내지 않는다. 지금까지 못 본 실패 방식이 하나 남아 있다 — 노드가
     // 생겼다가 나중에 사라지는 경우(ueventd 의 remove 처리 등). 한동안 지켜보다가
