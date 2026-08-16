@@ -349,7 +349,9 @@ qemu-system-aarch64 "${ARGS[@]}"
 | 6 | `/system` `/cache` `/data` 마운트 | ✅ | **장치 순서** (아래 7.1) |
 | 7 | zygote / system_server 기동 | ✅ | **바인더** (아래 7.2) |
 | 8 | SurfaceFlinger | ✅ | abort 안 함. `/dev/qemu_pipe` 자리를 뺏고 나서 해결 (7.3, 7.3c) |
-| 9 | emugl 연결 | 🔶 | 게스트가 `pipe:opengles` 를 열고 호스트 소켓까지 보냄. **CI 에는 답할 렌더러가 없어 여기까지가 한계** (7.3d) |
+| 9 | emugl 연결 | ✅ | 폰에서 SurfaceFlinger 가 `init()` 을 끝내고 `bootanim` 을 띄움 (7.3e). CI 는 답할 렌더러가 없어 여기서 멈춤 (7.3d) |
+| 10 | 부팅 완료 | ❔ | 폰 로그가 8.7초에서 끊겨 미확인 |
+| 11 | APK 전달·실행 | ❌ | 아직 없음. `EXTRA_APK_PATH` 는 부팅 경로에서 한 번도 안 쓰임 |
 
 ### 7.1 virtio-mmio 는 커맨드라인 순서를 보장하지 않는다
 
@@ -597,6 +599,38 @@ ServiceManager: Waiting for service SurfaceFlinger...   (계속)
 렌더러(`app/src/main/jniLibs/arm64-v8a/libemugl_host_android.so` — `emugl::RendererImpl`,
 `GLESv2Decoder`, `ColorBuffer`, `RenderWindow` 가 들어 있습니다)이고, 그건 폰에서만
 돕니다. 다음 검증은 폰에서 해야 합니다.
+
+### 7.3e 폰 실측 — SurfaceFlinger 통과
+
+폰에서 같은 이미지를 돌린 결과입니다. 장치 노드 교정은 폰에서도 글자 그대로 같았고
+(같은 링크, 같은 major:minor), 그 뒤가 CI 와 갈립니다:
+
+```
+[3.403] qemu_piped: created /dev/qemu_pipe as 507:0
+        (이전: 심볼릭 링크 -> /dev/goldfish_pipe (대상 없음) / 이후: 문자 장치 507:0 권한 0666)
+[3.629] pipetest: RESULT ok: 3/3 pipes opened concurrently
+[5.256] qemu_piped: pipe 4 -> /dev/vport3p4
+[5.507] qemu_piped: pipe 5 -> /dev/vport3p5
+[5.819] qemu_piped: pipe closed, /dev/vport3p4 freed
+[6.618] qemu_piped: pipe 4 -> /dev/vport3p4        ← 닫았다 다시 엶
+[6.936] qemu_piped: pipe 6 -> /dev/vport3p6
+[6.997] init: Starting service 'bootanim'...
+```
+
+**`bootanim` 은 SurfaceFlinger 가 직접 띄웁니다** — `SurfaceFlinger::init()` 끝의
+`startBootAnim()` 이 `ctl.start bootanim` 을 씁니다. 그 줄이 있다는 것은 init() 이
+끝까지 갔다는 뜻이고, 따라서 그 앞의 EGL·gralloc 초기화가 성공했다는 뜻입니다.
+로그에 `killed by signal 6` 도 `failed to open framebuffer` 도 없고, zygote·
+audioserver·cameraserver 가 죽지 않고 살아 있습니다 — CI 가 무한 재시작하던 자리입니다.
+
+CI 와의 결정적 차이는 **파이프가 닫혔다 다시 열린다**는 것입니다. CI 에서는
+`pipe:opengles` 가 열린 채 영영 멈춰 있었습니다(답하는 쪽이 없으니까). 폰에서는 4번이
+반납됐다 재사용되고 6번도 돌았습니다. 반대쪽이 실제로 응답하고 있다는 뜻입니다.
+
+> 포트 여유에 관한 메모: 풀은 8개고 `pipetest` 가 부팅 중 가장 붐비는 5초 동안 3개를
+> 잡습니다. 이번엔 문제가 없었지만(실제 클라이언트는 4·5·6번을 받았습니다) 렌더링하는
+> 프로세스마다 자기 파이프가 필요하므로, 앱까지 돌리기 시작하면 `TRANSPORT_PIPE_COUNT`
+> (`GuestRunActivity`) 를 올려야 할 수 있습니다.
 
 ### 7.4 치명적이지 않은 잡음 (무시해도 됨)
 
