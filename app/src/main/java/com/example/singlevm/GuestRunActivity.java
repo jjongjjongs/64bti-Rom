@@ -90,6 +90,33 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
     private static final long QEMU_LOG_UI_FLUSH_MS = 400L;
     /** How often the running log is mirrored somewhere a file manager can open. */
     private static final long QEMU_LOG_MIRROR_MS = 3_000L;
+    /**
+     * libemugl_probe.so logs every byte it moves in either direction under this tag, with a hex
+     * dump — "%s guest->renderer transfer=... hex=..." and the matching renderer->guest line, plus
+     * "%s connected", "renderer pipe creation failed" and "socket poll ended revents=...".
+     *
+     * <p>None of it has ever been read. The bridge runs inside the app, so its output goes to
+     * logcat, and the phone has no adb; the on-screen log only ever showed the string
+     * nativeStartEmuglBridge returns ("emugl bridge starting: ..."), which is printed before the
+     * thread has even connected. The guest half is now proven correct end to end — CI sees
+     * pipe:opengles, then the 4-byte clientFlags, then the 20-byte rcGetGLString query arrive on
+     * the host socket — so whatever swallows them is on this side of the socket, and these lines
+     * are the only witness to it.
+     *
+     * <p>An unprivileged app reads its own UID's log without any permission, which is exactly the
+     * scope needed here.
+     */
+    private static final String[] BRIDGE_LOGCAT_COMMAND = {
+        "logcat", "-v", "time", "-T", "1", "-s",
+        "SingleVmGlesBridge:V", "emuGL:V", "libc:V", "DEBUG:V", "AndroidRuntime:E",
+    };
+    /** How many trailing bridge log lines are kept on screen. */
+    private static final int BRIDGE_LOG_TAIL_LINES = 60;
+    /**
+     * Once GLES traffic actually flows, the per-transfer hex dumps arrive faster than anything can
+     * usefully read them. Keep the file bounded; the tail on screen stays live either way.
+     */
+    private static final int BRIDGE_LOG_MAX_LINES = 20_000;
     /** A guest that dies faster than this never really booted; say so loudly. */
     private static final long QEMU_EARLY_EXIT_MS = 5_000L;
     private static final String GUEST_DIAGNOSTICS_COMMAND =
@@ -109,6 +136,8 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
      * boot meant that marker suppressed the very warning it should have triggered.
      */
     private volatile int qemuOutputLines = 0;
+    private final Deque<String> bridgeTail = new ArrayDeque<>();
+    private volatile Process bridgeLogProcess;
     private String runtimeLog = "";
     private boolean runtimeStarted = false;
     private boolean surfaceAttached = false;
@@ -574,6 +603,9 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
                     logDir.mkdirs();
                 }
                 File outputLog = new File(logDir, "qemu-modern.log");
+                // Start before QEMU: the bridge threads connect within milliseconds of
+                // builder.start(), and "connected" / the first transfer are the lines that matter.
+                startBridgeLogCapture(logDir);
                 ProcessBuilder builder = new ProcessBuilder(command);
                 builder.directory(getFilesDir());
                 builder.environment().put("LD_LIBRARY_PATH",
@@ -754,6 +786,11 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
 
     @Override // android.app.Activity
     protected void onDestroy() {
+        Process bridgeLog = this.bridgeLogProcess;
+        if (bridgeLog != null) {
+            bridgeLog.destroy();
+            this.bridgeLogProcess = null;
+        }
         Process process = this.qemuProcess;
         if (!isChangingConfigurations() && process != null && process.isAlive()) {
             // QEMU handles SIGTERM by shutting the VM down cleanly and exiting 0, which is
@@ -799,6 +836,73 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         appendRuntimeLog("\nsurface bridge: destroyed");
     }
 
+    /**
+     * Pumps this process's own logcat into {@code gles-bridge.log} and onto the screen, so the
+     * emugl bridge's account of what it did with each pipe socket is visible on a phone with no
+     * adb. Fire-and-forget: if logcat cannot be spawned, that fact is reported and the guest runs
+     * regardless.
+     */
+    private void startBridgeLogCapture(final File logDir) {
+        new Thread(() -> {
+            File bridgeLog = new File(logDir, "gles-bridge.log");
+            long[] lastMirror = {0L};
+            long[] lastFlush = {0L};
+            int written = 0;
+            try {
+                ProcessBuilder builder = new ProcessBuilder(BRIDGE_LOGCAT_COMMAND);
+                builder.redirectErrorStream(true);
+                Process logcat = builder.start();
+                this.bridgeLogProcess = logcat;
+                appendBridgeLine("[logcat 시작: " + String.join(" ", BRIDGE_LOGCAT_COMMAND) + "]");
+                try (BufferedReader reader = new BufferedReader(
+                             new InputStreamReader(logcat.getInputStream(), StandardCharsets.UTF_8));
+                     Writer writer = new OutputStreamWriter(
+                             new FileOutputStream(bridgeLog, false), StandardCharsets.UTF_8)) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (written < BRIDGE_LOG_MAX_LINES) {
+                            writer.write(line);
+                            writer.write('\n');
+                            writer.flush();
+                            written++;
+                            if (written == BRIDGE_LOG_MAX_LINES) {
+                                writer.write("[" + BRIDGE_LOG_MAX_LINES + "줄에서 파일 기록 중단]\n");
+                                writer.flush();
+                            }
+                        }
+                        appendBridgeLine(line);
+                        long now = SystemClock.elapsedRealtime();
+                        // QEMU's output is what normally drives renderLog. Repaint from here too,
+                        // or a bridge that says something while the guest is quiet says it to
+                        // nobody.
+                        if (now - lastFlush[0] >= QEMU_LOG_UI_FLUSH_MS) {
+                            lastFlush[0] = now;
+                            runOnUiThread(this::renderLog);
+                        }
+                        if (now - lastMirror[0] >= QEMU_LOG_MIRROR_MS) {
+                            lastMirror[0] = now;
+                            copyLogToSharedDir(bridgeLog);
+                        }
+                    }
+                }
+                appendBridgeLine("[logcat 종료]");
+            } catch (IOException | RuntimeException e) {
+                appendBridgeLine("[logcat 실패: " + e.getMessage() + "]");
+            }
+            copyLogToSharedDir(bridgeLog);
+            runOnUiThread(this::renderLog);
+        }, "single-vm-bridge-log").start();
+    }
+
+    private void appendBridgeLine(String line) {
+        synchronized (this.bridgeTail) {
+            this.bridgeTail.addLast(line);
+            while (this.bridgeTail.size() > BRIDGE_LOG_TAIL_LINES) {
+                this.bridgeTail.removeFirst();
+            }
+        }
+    }
+
     private void setRuntimeLog(String value) {
         this.runtimeLog = value;
         renderLog();
@@ -814,7 +918,18 @@ public class GuestRunActivity extends Activity implements SurfaceHolder.Callback
         synchronized (this.qemuTail) {
             tail = this.qemuTail.isEmpty() ? "" : String.join("\n", this.qemuTail);
         }
-        return tail.isEmpty() ? this.runtimeLog : this.runtimeLog + "\n\n--- QEMU ---\n" + tail;
+        String bridge;
+        synchronized (this.bridgeTail) {
+            bridge = this.bridgeTail.isEmpty() ? "" : String.join("\n", this.bridgeTail);
+        }
+        StringBuilder out = new StringBuilder(this.runtimeLog);
+        if (!bridge.isEmpty()) {
+            out.append("\n\n--- emugl 브리지 (logcat) ---\n").append(bridge);
+        }
+        if (!tail.isEmpty()) {
+            out.append("\n\n--- QEMU ---\n").append(tail);
+        }
+        return out.toString();
     }
 
     /**

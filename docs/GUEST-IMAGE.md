@@ -743,6 +743,79 @@ qemu_piped: pipe 3: read 가 60초째 대기 중 (호스트가 조용하다)
 바이트를 16진수로 찍으므로, emugl 이 헤더 뒤에 정확히 무엇을 보내는지 다음 런에서
 확인할 수 있습니다.
 
+### 7.10 게스트는 결백합니다 — 세 번의 쓰기가 전부 나갑니다
+
+7.9 의 "다음에 봐야 할 것" 이 답을 냈습니다. CI 청취기의 16진수 출력입니다:
+
+```
+[pipe5.sock] *** 서비스 헤더: 'pipe:opengles' (14 바이트 수신) ***
+[pipe5.sock] +4 바이트  (누적 18) hex[00 00 00 00] ascii[....]
+[pipe5.sock] +20 바이트 (누적 38) hex[13 27 00 00 14 00 00 00 03 1f 00 00 00 00 00 00 00 00 00 00]
+```
+
+세 번의 쓰기가 **전부** 호스트 소켓에 도착합니다. 논블로킹 데몬이 두 번째 쓰기를
+흘리는 게 아니냐는 의심(파이프 하나에 두 번 쓰는 것은 pipetest 가 한 번도 확인해 준
+적이 없었습니다)은 이걸로 지워집니다. 바이트도 정확합니다:
+
+| 값 | 뜻 |
+|---|---|
+| `00 00 00 00` | HostConnection 이 보내는 4바이트 `clientFlags` |
+| `0x2713` = 10003 | renderControl `rcGetGLString` |
+| `0x14` = 20 | 이 패킷의 길이 |
+| `0x1f03` = 7939 | `GL_EXTENSIONS` |
+
+즉 게스트는 규격대로 `rcGetGLString(GL_EXTENSIONS)` 를 묻고 답을 기다립니다.
+**게스트 절반은 여기서 끝났습니다.** 남은 것은 소켓 이쪽 편, 앱 안입니다.
+
+#### 프리빌트 브리지를 뜯어봤습니다
+
+`libemugl_probe.so` 는 소스가 없지만(README "세대 C") 스트링과 역어셈블로 구조가
+전부 드러납니다. 확인한 것:
+
+- `nativeStartEmuglBridge(path, primary)` 는 소켓마다 **스레드를 하나 띄우고 즉시
+  돌아옵니다.** 화면에 찍히던 `emugl bridge starting: ...` 는 그 반환값이므로,
+  **연결됐다는 뜻이 전혀 아닙니다.** 24줄이 다 찍혀도 아무것도 증명하지 못합니다.
+- 두 번째 인자(`pipeIndex == 0`)는 전역 세대 카운터를 1 올릴지(`primary`) 그냥
+  읽을지를 고릅니다. 각 스레드는 자기 세대를 들고 루프마다 대조해서, 다음 실행이
+  시작되면 스스로 빠집니다. 자바가 0번부터 순서대로 부르므로 동작은 맞습니다.
+- 스레드 본체: `connect()` 재시도 → `emugl_pipe_open()` → `poll(POLLIN, 5ms)` →
+  `recv(65536)` → `emugl_pipe_send()` → 반대 방향은 `emugl_pipe_recv()` → `send()`.
+- 헤더를 떼지 않고 **받은 바이트를 그대로 넘깁니다.** 그게 맞습니다.
+  `libemugl_host_android.so` 의 `emugl_pipe_send` 가 상태 0 에서 NUL 까지를 모아
+  문자열로 쌓고, `"pipe:opengles\0"` **14바이트(NUL 포함)** 와 비교합니다.
+  게스트가 보내는 것과 정확히 일치합니다.
+
+**즉 프로토콜은 양쪽 다 맞습니다.** 정적으로 더 좁힐 수 있는 곳이 없습니다.
+
+#### 한 번도 읽지 않은 로그가 있었습니다
+
+브리지는 자기가 옮기는 바이트를 전부 기록하고 있었습니다. 태그는
+`SingleVmGlesBridge`:
+
+```
+%s connected
+%s guest->renderer transfer=%u bytes=%zd total=%llu hex=%s
+%s renderer->guest transfer=%u bytes=%d total=%llu hex=%s
+%s disconnected guestBytes=%llu rendererBytes=%llu
+renderer pipe creation failed / pipe API lookup failed
+socket poll ended revents=0x%x / socket recv ended result=%zd errno=%d
+renderer send failed result=%d offset=%zu size=%zd
+```
+
+브리지는 앱 안에서 돌기 때문에 이 줄들은 **logcat** 으로 갑니다. 폰에는 adb 가
+없고 화면 로그에는 QEMU 시리얼만 흐르고 있었으니, 지금까지 아무도 이걸 본 적이
+없습니다. 앱이 **자기 UID 의 로그**를 읽는 데에는 권한이 필요 없으므로,
+`GuestRunActivity` 가 QEMU 를 띄우기 직전에 `logcat` 을 붙여서 화면과
+`gles-bridge.log` 양쪽에 남기도록 했습니다.
+
+#### 다음 폰 실행이 셋 중 하나로 갈립니다
+
+| logcat 에 보이는 것 | 뜻 | 다음에 볼 곳 |
+|---|---|---|
+| `connected` 만 있고 `guest->renderer` 가 없다 | 바이트가 게스트를 떠났는데 앱에 안 온다 | QEMU chardev / 소켓 배선 |
+| `guest->renderer ... hex=pipe:opengles` 는 있는데 `renderer->guest` 가 없다 | 렌더러가 받고도 안 답한다 | `libemugl_host_android` 렌더 스레드 |
+| `renderer pipe creation failed` 또는 `pipe API lookup failed` | 렌더러가 준비 안 됐다 | `nativeProbeEmugl` 과 브리지 사이의 상태 |
+
 ### 7.6 healthd 를 껐던 것이 부팅을 막고 있었습니다
 
 그래픽이 전부 붙은 뒤에도 화면은 검은 채였습니다. 폰 로그를 끝까지 받아 보니 이유가
