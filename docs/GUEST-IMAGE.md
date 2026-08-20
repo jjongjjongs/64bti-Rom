@@ -816,6 +816,74 @@ renderer send failed result=%d offset=%zu size=%zd
 | `guest->renderer ... hex=pipe:opengles` 는 있는데 `renderer->guest` 가 없다 | 렌더러가 받고도 안 답한다 | `libemugl_host_android` 렌더 스레드 |
 | `renderer pipe creation failed` 또는 `pipe API lookup failed` | 렌더러가 준비 안 됐다 | `nativeProbeEmugl` 과 브리지 사이의 상태 |
 
+### 7.11 막고 있던 것은 opengles 가 아니라 grallocPipe 였습니다
+
+앱의 logcat 을 화면에 끌어오자 한 번에 드러났습니다. **emugl 파이프는 처음부터
+멀쩡했습니다.** 핸드셰이크가 끝까지 갑니다:
+
+```
+pipe0.sock guest->renderer transfer=1 bytes=14 hex=70 69 70 65 3a 6f 70 65 6e 67 6c 65 73 00
+pipe0.sock renderer->guest transfer=1 bytes=4  hex=c5 ff ff ff        (-59: 버퍼가 이만큼 필요하다)
+pipe0.sock renderer->guest transfer=2 bytes=63 hex=GL_OES_vertex_array_object ANDROID_EMU_...
+pipe0.sock EGL configs result=68 count=68 attrs=35 rgba8888=24 rgbx8888=16 rgb565=12 window=68
+pipe0.sock renderer->guest transfer=28 bytes=20 hex=41 64 72 65 6e 6f 20 28 54 4d 29 20 38 34 30 00   ("Adreno (TM) 840")
+```
+
+렌더컨트롤 순서를 그대로 따라가면 rcGetRendererVersion → rcGetEGLVersion →
+rcGetNumConfigs(68개) → rcGetConfigs → rcGetFBParam(480×800 — 커맨드라인의
+`xres=480,yres=800` 과 일치) → rcCreateContext → rcCreateWindowSurface →
+rcCreateColorBuffer → rcMakeCurrent → GLESv2 명령 몇 개 → rcCloseColorBuffer.
+**SurfaceFlinger 는 GL 을 이미 쓰고 있었습니다.**
+
+그 직후에 멈춥니다. 이유는 다른 파이프입니다:
+
+```
+pipe2.sock first guest packet bytes=17 preview=pipe:grallocPipe.
+renderer send failed result=-1 offset=0 size=17
+pipe2.sock disconnected guestBytes=17 rendererBytes=0
+pipe2.sock connected
+pipe2.sock first guest packet bytes=4 preview=d...    hex=64 00 00 00
+renderer send failed result=-1 offset=0 size=4
+```
+
+`pipe:qemud:adb:5555` 도 같은 식으로 거절당합니다.
+
+#### 왜 거절되는가
+
+`libemugl_probe.so` 의 문자열 테이블에 서비스 표가 그대로 들어 있습니다 —
+`pipe:qemud:boot-properties`, `pipe:qemud:sensors`, `pipe:qemud:camera` 세 개의
+qemud 핸들러(`%s serving qemud camera`, `%s boot-properties list response=%d` 도
+같이 있습니다)와, **나머지 전부를 넘겨받는 emugl**. 그런데 넘겨받는 쪽
+(`libemugl_host_android.so` 의 `emugl_pipe_send`)은 7.10 에서 확인한 대로 헤더가
+정확히 `"pipe:opengles\0"` 일 때만 받아들이고 그 외에는 -1 을 돌려줍니다.
+
+그래서 브리지는 소켓을 끊고 다시 붙을 뿐이고, **게스트에게는 아무 답도 가지
+않습니다.** gralloc 은 답을 기다리며 멈추고, SurfaceFlinger 가 그 뒤에서 함께
+멈춥니다. 데몬이 계속 말하던 "호스트가 조용하다" 는 정확한 보고였습니다 —
+조용한 파이프가 opengles 가 아니었을 뿐입니다.
+
+#### 없는 것은 없다고 말합니다
+
+진짜 goldfish 호스트라면 등록되지 않은 서비스에 대해 **헤더 쓰기 자체가
+실패하고**, 게스트의 `qemu_pipe_open()` 이 -1 을 받습니다. 그걸 그대로
+흉내냅니다. `qemu_piped` 가 첫 쓰기를 들여다보고, 호스트가 답할 수 없는
+서비스면 `-EINVAL` 로 거절합니다. 영영 기다리게 두는 것보다 낫고, 포트도
+돌려받습니다.
+
+허용 목록은 위 네 가지입니다(`pipetest:*` 는 CI 전용이라 예외).
+`grallocPipe` 와 `qemud:adb` 는 거절됩니다. 둘 다 부팅에 필수가 아닙니다 —
+gralloc 의 실제 작업인 컬러버퍼 생성/해제는 **opengles** 연결로 나가고, 그건
+위에서 보듯 잘 돌고 있습니다.
+
+거절이 gralloc 에게도 괜찮은지는 다음 실행이 말해 줍니다. 견디면 SurfaceFlinger
+가 지나가고, 못 견디면 이번엔 **소리를 내며** 실패하므로 무엇을 구현해야 할지
+알게 됩니다. 어느 쪽이든 조용한 정지보다 낫습니다.
+
+#### 덤: 로그가 이제 서비스 이름을 말합니다
+
+`pipe 2` 가 어느 서비스였는지 알아내려고 타임스탬프를 맞춰 보는 짓을 더는 하지
+않아도 됩니다. 파이프를 열 때와 닫을 때 서비스 이름을 함께 찍습니다.
+
 ### 7.6 healthd 를 껐던 것이 부팅을 막고 있었습니다
 
 그래픽이 전부 붙은 뒤에도 화면은 검은 채였습니다. 폰 로그를 끝까지 받아 보니 이유가

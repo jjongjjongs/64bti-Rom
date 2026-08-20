@@ -248,7 +248,46 @@ struct pipe_slot {
     // 답하지 않는 것과 게스트가 애초에 안 보내는 것이 로그상 똑같이 조용하다.
     unsigned long tx, rx;   // tx=게스트→호스트, rx=호스트→게스트
     int rx_announced;       // 첫 응답만 한 번 알린다
+    int header_seen;        // 첫 쓰기(서비스 이름)를 이미 검사했는가
+    int rejected;           // 호스트에 없는 서비스라 거절한 파이프
+    char service[64];       // 로그용. 헤더에서 뽑은 서비스 이름
 };
+
+// 호스트가 실제로 답할 수 있는 서비스 목록.
+//
+// 앱의 libemugl_probe.so 는 소스가 없지만, 문자열 테이블에 서비스 이름이 그대로
+// 들어 있어서 무엇을 처리하는지 확인할 수 있다: "pipe:qemud:boot-properties",
+// "pipe:qemud:sensors", "pipe:qemud:camera" 세 개의 qemud 핸들러와, 나머지 전부를
+// 넘겨받는 emugl. 그런데 emugl 쪽(libemugl_host_android.so 의 emugl_pipe_send)은
+// 헤더가 정확히 "pipe:opengles\0" 일 때만 받아들이고 그 외에는 -1 을 돌려준다.
+//
+// 그래서 목록에 없는 서비스를 열면 브리지가 소켓을 끊고 다시 붙을 뿐, 게스트에게는
+// 아무 답도 가지 않는다. 실측(폰 logcat):
+//
+//   pipe2.sock first guest packet bytes=17 preview=pipe:grallocPipe.
+//   renderer send failed result=-1 offset=0 size=17
+//   pipe2.sock disconnected guestBytes=17 rendererBytes=0
+//
+// 그 상태로 gralloc 은 답을 기다리며 멈추고, SurfaceFlinger 가 그 뒤에서 함께
+// 멈춘다. 진짜 goldfish 호스트라면 등록되지 않은 서비스에 대해 헤더 쓰기 자체가
+// 실패하고, 게스트의 qemu_pipe_open() 은 -1 을 받는다. 여기서 그 동작을 그대로
+// 흉내낸다 — 없는 것은 없다고 말해 주는 편이 영영 기다리게 두는 것보다 낫다.
+static const char *const g_known_services[] = {
+    "opengles",
+    "qemud:boot-properties",
+    "qemud:sensors",
+    "qemud:camera",
+};
+
+static int service_known(const char *name) {
+    // pipetest 는 CI 전용이다. 호스트에 붙는 것은 듣기만 하는 host_listener.py 라
+    // 목록에는 없지만, 여기서 거절해 버리면 다중 파이프 검증이 통째로 사라진다.
+    // 폰에서는 singlevm.pipetest=1 이 없어 아예 열리지 않는다.
+    if (strncmp(name, "pipetest:", 9) == 0) return 1;
+    for (size_t i = 0; i < sizeof(g_known_services) / sizeof(g_known_services[0]); i++)
+        if (strcmp(name, g_known_services[i]) == 0) return 1;
+    return 0;
+}
 
 static char g_ports[MAX_PIPES][288];
 static int g_port_taken[MAX_PIPES];
@@ -482,6 +521,9 @@ static int slot_alloc(void) {
     s->fd = fd;
     s->port_index = port;
     s->slot_no = idx + 1;
+    s->header_seen = 0;
+    s->rejected = 0;
+    s->service[0] = '\0';
     pthread_mutex_init(&s->rq.lock, NULL);
     pthread_cond_init(&s->rq.cv, NULL);
     pthread_mutex_init(&s->wq.lock, NULL);
@@ -524,8 +566,9 @@ static void slot_free(struct pipe_slot *s) {
     pthread_mutex_lock(&g_pool_lock);
     close(s->fd);
     g_port_taken[s->port_index] = 0;
-    put("pipe %d closed, %s freed (보냄 %lu, 받음 %lu 바이트)",
-        s->slot_no, g_ports[s->port_index], s->tx, s->rx);
+    put("pipe %d [%s] closed, %s freed (보냄 %lu, 받음 %lu 바이트)",
+        s->slot_no, s->service[0] ? s->service : "?", g_ports[s->port_index],
+        s->tx, s->rx);
     s->in_use = 0;
     pthread_mutex_unlock(&g_pool_lock);
 }
@@ -751,6 +794,7 @@ int main(void) {
             memcpy(&ri, body, sizeof(ri));
             struct pipe_slot *s = slot_of(ri.fh);
             if (!s) { reply(in.unique, -EBADF, NULL, 0); break; }
+            if (s->rejected) { reply(in.unique, -EINVAL, NULL, 0); break; }
             struct request *r = calloc(1, sizeof(*r));
             if (!r) { reply(in.unique, -ENOMEM, NULL, 0); break; }
             r->unique = in.unique;
@@ -772,6 +816,24 @@ int main(void) {
             r->payload = malloc(len ? len : 1);
             if (!r->payload) { free(r); reply(in.unique, -ENOMEM, NULL, 0); break; }
             memcpy(r->payload, body + sizeof(wi), len);
+            // goldfish 규약: 파이프를 연 뒤 첫 쓰기가 "pipe:<서비스>\0" 이다.
+            if (!s->header_seen) {
+                s->header_seen = 1;
+                const char *buf = (const char *)r->payload;
+                if (len > 5 && memcmp(buf, "pipe:", 5) == 0 && memchr(buf, '\0', len)) {
+                    snprintf(s->service, sizeof(s->service), "%s", buf + 5);
+                    if (!service_known(s->service)) {
+                        put("pipe %d: 서비스 '%s' 는 호스트에 없다 - 열기를 거절한다",
+                            s->slot_no, s->service);
+                        s->rejected = 1;
+                        free(r->payload);
+                        free(r);
+                        reply(in.unique, -EINVAL, NULL, 0);
+                        break;
+                    }
+                    put("pipe %d: 서비스 '%s'", s->slot_no, s->service);
+                }
+            }
             r->unique = in.unique;
             r->opcode = FUSE_WRITE_OP;
             r->size = (uint32_t)len;
